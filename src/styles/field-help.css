@@ -1,0 +1,28 @@
+.field-heading{display:flex;align-items:center;gap:8px;min-height:24px}
+.field-heading>label{cursor:pointer}
+.field-help-trigger{display:inline-grid!important;place-items:center;width:24px;height:24px;min-width:24px;min-height:24px;padding:0!important;border:1px solid var(--line-strong)!important;border-radius:50%!important;font:12px/1 var(--mono)!important;color:var(--muted);flex-shrink:0}
+.field-help-trigger:hover{color:var(--yellow);border-color:var(--yellow)!important}
+.field-help-content{font:13px/1.7 Arial,Helvetica,sans-serif;max-width:360px;overflow-wrap:anywhere}
+.field-help-content p:last-child{margin-bottom:0}.field-help-content code{font-family:var(--mono)}
+.check-with-help{display:flex;align-items:center;gap:10px}.check-with-help .check{margin-right:0}
+.items-table .field-heading{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+.items-table th .field-help-trigger{margin-left:6px}.items-table th{white-space:nowrap}
+.import-guide{container-type:inline-size;border-top:1px solid var(--line);padding-top:24px;margin-top:24px}
+.import-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}
+.import-heading>div:first-child{min-width:0}
+.import-heading h3{margin:0 0 8px;font-size:20px;line-height:1.4}
+.import-guide p,.import-guide li{font-size:13px;line-height:1.7;color:var(--muted)}
+.import-heading p{margin:0}
+.import-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.import-actions button{white-space:nowrap;font-size:12px;padding:10px 12px;min-height:40px}
+.import-format-line{margin:20px 0 8px;overflow-wrap:anywhere}
+.import-guide summary{cursor:pointer;font:12px/1.7 var(--mono);padding:10px 0;color:var(--yellow)}
+.import-guide pre{overflow:auto;padding:14px;border:1px solid var(--line);font:12px/1.7 var(--mono);white-space:pre;max-width:100%;margin-top:12px}
+.import-guide code{color:#eee;font:12px/1.7 var(--mono)}
+.studio-modal.item-import-modal{width:min(820px,calc(100vw - 32px))}
+.item-import-modal .item-import{border:0;padding:0;margin:0}
+.item-import-modal .table-scroll{max-height:320px;margin:20px 0}
+.item-import-modal th{white-space:nowrap}.item-import-modal td{overflow-wrap:anywhere;max-width:300px;min-width:85px}
+@container(max-width:650px){.import-heading{flex-direction:column;gap:16px}.import-actions{width:100%;justify-content:flex-start}}
+@container(max-width:360px){.import-actions{display:grid;grid-template-columns:1fr 1fr}.import-actions button{white-space:normal;padding:10px 8px}}
+@media(pointer:coarse){.field-help-trigger{width:32px;height:32px;min-width:32px;min-height:32px}}

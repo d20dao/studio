@@ -1,0 +1,9 @@
+.studio-popover{position:fixed;inset:auto;margin:0;box-sizing:border-box;background:#101010;color:#f5f2ee;border:1px solid var(--line-strong);border-radius:4px;padding:18px;overflow:auto;overscroll-behavior:contain;box-shadow:0 12px 32px #0008;font:14px/1.65 Arial,Helvetica,sans-serif;overflow-wrap:anywhere}
+.studio-popover:focus-visible{outline:2px solid var(--yellow);outline-offset:2px}
+.popover-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}
+.popover-heading h3{font:16px/1.5 var(--mono);letter-spacing:0;margin:3px 0 0}
+.popover-heading button{border:0;min-width:32px;min-height:32px;padding:0;font:22px/1 var(--mono);flex-shrink:0}
+.studio-popover p{margin:0 0 12px}.studio-popover p:last-child{margin-bottom:0}
+.studio-popover code{font-family:var(--mono);color:#eee}
+.studio-popover .actions{margin-top:16px}
+@media(max-width:760px){.popover-heading button{min-width:40px;min-height:40px}.studio-popover{padding:16px}}
