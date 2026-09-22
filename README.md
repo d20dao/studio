@@ -4,9 +4,31 @@ Product specification and implementation brief
 
 - **Proposed domain:** `studio.d20dao.org`
 - **Created:** September 22, 2026
-- **Status:** Planning document. No Studio application, generator, contracts, or deployment have been implemented in this folder.
+- **Status:** Local Studio v0.2 is implemented, including metadata previews and bounded NFT templates. The product specification below also includes later capabilities.
 - **Primary audience:** Game developers and NFT project teams.
 - **Primary objective:** Help independent projects adopt D20DAO by turning their game or NFT mechanic into a practical integration starter.
+- **Interface studies:** [ImageGen concepts and design references](design/README.md), prepared with the requested Astra medium agent. These are visual studies, not an implemented Studio application.
+
+## Run the current skeleton
+
+```sh
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5178`. See [DEVELOPMENT.md](DEVELOPMENT.md) for architecture, checks, and build commands.
+
+The current React/TypeScript/Vite application implements:
+
+- Local projects with duplicate/delete/undo, JSON import/export, hash navigation, remembered views, conflict-aware saves, and explicit recovery of malformed storage.
+- Lootbox/reveal configuration, weighted probability summaries, optional token IDs, premint/royalty settings, and payment/recovery choices.
+- Metadata thumbnails and accessible NFT cards, bounded HTTPS/IPFS/Arweave loading, local JSON fallback, and previewed JSON/CSV item import.
+- A file browser with syntax highlighting, line numbers, compiler diagnostic navigation, ZIP export, and project-specific agent instructions.
+- New-project ERC-1155 loot or ERC-721 reveal collections with configured premint, ERC-2981 royalty signaling, supply limits, and authenticated VRF consumers. Existing-project exports remain adapters and instructions. Invalid configuration produces a planning bundle without Solidity.
+- Real client-side Solidity 0.8.28 compilation in a worker, using pinned SDK 0.4.0 and OpenZeppelin 5.6.1 sources, with cancellation and ABI/bytecode inspection/download.
+- Project, persistence, metadata, generator, compiler, and local EVM lifecycle tests, plus a static production build and CI configuration.
+
+**Current boundary:** new-project templates implement their documented NFT/VRF behavior; application sale pricing, fee sponsorship, custom refund routing, and game-specific eligibility remain explicit integration work. Existing-contract integration still depends on that contract's interface and permissions. Callbacks store the accepted word; bounded application delivery/finalization is a separate transaction and is not a mandatory Studio onboarding step. Local EVM tests use a coordinator lifecycle double, not live cryptographic proof acceptance. No live deployment or hosted publication is included.
 
 ## 1. Product concept
 
@@ -366,7 +388,7 @@ ancient-chest/
   AGENT_PROMPT.md
 ```
 
-This is an illustrative generated-project layout, not a statement that these files currently exist.
+This is the target generated-project layout. The current generator exports its implemented subset; client examples and generated application behavior tests remain later work.
 
 The generation manifest should record template and dependency versions, the project specification identity, generated files, unresolved integration points, and which checks actually ran.
 
@@ -488,7 +510,7 @@ Generate meaningful behavioral checks for the chosen template and features, such
 - Refund notification failure without duplicate payment.
 - Metadata assignment reproducibility and the selected mapping's bounds.
 
-Testing the generated code is a future generator capability. This planning document does not claim that these tests have been written or executed.
+The current generator's consumers are compiled in the test suite, and the browser exposes real compilation. The full generated-application behavioral suite listed above remains future work; compilation alone is not runtime contract validation.
 
 Local simulations, local contract tests, testnet transactions, and mainnet transactions must remain distinct in reports and UI.
 
@@ -506,7 +528,7 @@ Recommended workspace areas:
 
 Prioritize clear forms, visible validation, persistent drafts, and explanations of consequential choices. Technical details should appear where they help a developer make a decision, rather than overwhelming the initial onboarding.
 
-The selected theme, frontend framework, storage implementation, and exact visual design remain open decisions.
+The current skeleton uses the approved black/white/coral theme, React and TypeScript on Vite, shared native interface primitives, and browser-local persistence. Further visual refinements should follow the approved concepts.
 
 ## 17. Local data and credential boundaries
 
@@ -580,11 +602,10 @@ Track demo players, simulations, and D20DAO-operated requests separately from ex
 - First supported reward asset and NFT standard.
 - Exact boundary between new-contract and existing-contract generation.
 - Initial set of optional modules and supported combinations.
-- Browser persistence technology and asset-size limits.
+- Asset-size limits and migration from the current bounded localStorage drafts if larger asset bundles are introduced.
 - Metadata input/import format and export hosting instructions.
-- Frontend stack and visual design.
-- Template rendering and dependency-locking approach.
-- Where compilation and generated tests run, if included in Studio.
+- Extending the current template and dependency locks to complete NFT feature combinations.
+- Where the future generated-application behavioral tests run; browser compilation and local generator/compiler tests are already implemented.
 - Revenue model, if any; no Studio pricing has been selected.
 - Timing of public hosting and domain configuration.
 
