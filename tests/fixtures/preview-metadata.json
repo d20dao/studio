@@ -1,0 +1,10 @@
+{
+  "name": "Ethereum Relic",
+  "description": "A local preview fixture. This JSON is illustrative metadata, not a minted NFT.",
+  "image": "https://raw.githubusercontent.com/github/explore/main/topics/ethereum/ethereum.png",
+  "attributes": [
+    { "trait_type": "Element", "value": "Ether" },
+    { "trait_type": "Rarity", "value": "Rare" },
+    { "trait_type": "Level", "value": 12 }
+  ]
+}

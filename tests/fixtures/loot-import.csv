@@ -1,0 +1,3 @@
+name,metadataUri,weight,tokenId
+Crystal shard,ipfs://example/shard.json,80,10
+Ancient rune,ipfs://example/rune.json,20,11
