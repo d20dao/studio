@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { createProject, parseProjectJson, projectSlug, validateProject } from '../src/core/project';
 import { appendProject, duplicateProject, importProjects, parseRoute, removeProject, restoreProject, routeHash } from '../src/app/workspace-state';
+import type { StudioProject } from '../src/core/types';
+
+function legacyProject(project: StudioProject, schemaVersion: 1 | 2) {
+  const { reveal: _reveal, ...previous } = project;
+  return { ...previous, schemaVersion };
+}
 
 describe('versioned projects', () => {
   it('round-trips configured modules and metadata as data', () => {
@@ -10,7 +16,7 @@ describe('versioned projects', () => {
   });
   it('rejects unsupported versions and structurally invalid imported fields', () => {
     const project = createProject('Loot', 'lootbox');
-    expect(() => parseProjectJson(JSON.stringify({ ...project, schemaVersion: 3 }))).toThrow('schema');
+    expect(() => parseProjectJson(JSON.stringify({ ...project, schemaVersion: 4 }))).toThrow('schema');
     expect(() => parseProjectJson(JSON.stringify({ ...project, modules: {} }))).toThrow('premint');
     expect(() => parseProjectJson(JSON.stringify({ ...project, network: 'unknown-chain' }))).toThrow('network');
     expect(() => parseProjectJson(JSON.stringify({ ...project, codeToExecute: 'arbitrary' }))).toThrow('unsupported field');
@@ -21,20 +27,25 @@ describe('versioned projects', () => {
     project.loot.items[1].id = project.loot.items[0].id;
     expect(validateProject(project).filter(issue => issue.severity === 'error').map(issue => issue.path)).toEqual(expect.arrayContaining(['loot.items', 'loot.items.1.id']));
   });
-  it('enforces reveal limits and premint supply rather than only validating inputs independently', () => {
+  it('accepts reveal supply above 256 but enforces its chosen premint cap', () => {
     const project = createProject('Collection', 'reveal');
     project.collection.maxSupply = 300;
     project.modules.premint = { enabled: true, quantity: 301, recipient: '0x1111111111111111111111111111111111111111', includeInReveal: true };
-    expect(validateProject(project).filter(issue => issue.severity === 'error').map(issue => issue.path)).toEqual(expect.arrayContaining(['collection.maxSupply', 'modules.premint.quantity']));
+    const paths = validateProject(project).filter(issue => issue.severity === 'error').map(issue => issue.path);
+    expect(paths).toContain('modules.premint.quantity');
+    expect(paths).not.toContain('collection.maxSupply');
   });
   it('never derives an export path from raw display-name separators', () => {
     expect(projectSlug({ name: '../../etc/secret' })).not.toContain('/');
     expect(projectSlug({ name: '///' })).toBe('studio-project');
   });
-  it('reports an empty eligible reveal set in form validation before export', () => {
+  it('warns about a fully excluded finite premint without blocking batched reveal generation', () => {
     const project = createProject('All preminted', 'reveal');
+    project.collection.maxSupply = 128;
     project.modules.premint = { enabled: true, quantity: 128, recipient: '0x1111111111111111111111111111111111111111', includeInReveal: false };
-    expect(validateProject(project)).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'modules.premint.includeInReveal', severity: 'error' })]));
+    expect(validateProject(project)).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'modules.premint.includeInReveal', severity: 'warning' })]));
+    project.collection.maxSupply = null;
+    expect(validateProject(project).filter(issue => issue.path === 'modules.premint.includeInReveal')).toEqual([]);
   });
   it('reports structural export/load bounds as validation errors', () => {
     const project = createProject('Loot', 'lootbox');
@@ -132,6 +143,7 @@ describe('versioned projects', () => {
 
   it.each(['lootbox', 'reveal'] as const)('migrates a legacy %s project and import without changing any other value', mechanic => {
     const current = createProject('Legacy configured project', mechanic, 'existing');
+    current.collection.maxSupply = 128;
     current.createdAt = '2026-09-22T01:02:03.004Z';
     current.updatedAt = '2026-09-22T05:06:07.008Z';
     current.isExample = true;
@@ -140,19 +152,20 @@ describe('versioned projects', () => {
     current.payment = { price: '2.500000000000000001', rngPayer: 'developer', refundRecipient: 'custom', refundAddress: '0x3333333333333333333333333333333333333333', recovery: 'both', applicationRefund: 'developer-defined' };
     current.loot.items[0].tokenId = ((1n << 256n) - 1n).toString();
     current.loot.items[0].metadataUri = 'ipfs://original/{id}.json';
-    const original = JSON.stringify({ ...current, schemaVersion: 1, loot: { ...current.loot, maxOpenings: 700 } });
+    const original = JSON.stringify({ ...legacyProject(current, 1), loot: { ...current.loot, maxOpenings: 700 } });
     const migrated = parseProjectJson(original);
     expect(migrated).toEqual(current);
     expect(importProjects(original)).toEqual([current]);
     expect(importProjects(JSON.stringify({ schemaVersion: 1, projects: [JSON.parse(original)] }))).toEqual([current]);
-    expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.schemaVersion).toBe(3);
     expect(JSON.stringify(migrated)).not.toContain('maxOpenings');
     expect(parseProjectJson(JSON.stringify(migrated))).toEqual(current);
   });
 
   it('accepts absent or finite legacy limits but rejects malformed removed values before migration', () => {
     const project = createProject('Legacy draft', 'lootbox');
-    const legacy = { ...project, schemaVersion: 1 };
+    project.collection.maxSupply = 128;
+    const legacy = legacyProject(project, 1);
     expect(parseProjectJson(JSON.stringify(legacy))).toEqual(project);
     for (const maxOpenings of [0, -1, 1.5, Number.MAX_VALUE]) {
       expect(parseProjectJson(JSON.stringify({ ...legacy, loot: { ...legacy.loot, maxOpenings } }))).toEqual(project);
@@ -164,11 +177,102 @@ describe('versioned projects', () => {
     expect(() => parseProjectJson(overflow)).toThrow('finite number');
   });
 
-  it('never accepts the removed field in schema 2 or strips unrelated legacy fields', () => {
+  it('never accepts the removed field in current schemas or strips unrelated legacy fields', () => {
     const project = createProject('Current project', 'lootbox');
-    expect(project.schemaVersion).toBe(2);
+    project.collection.maxSupply = 128;
+    expect(project.schemaVersion).toBe(3);
     expect(project.loot).not.toHaveProperty('maxOpenings');
     expect(() => parseProjectJson(JSON.stringify({ ...project, loot: { ...project.loot, maxOpenings: 1000 } }))).toThrow('unsupported field');
-    expect(() => parseProjectJson(JSON.stringify({ ...project, schemaVersion: 1, loot: { ...project.loot, maxOpenings: 1000, futureSetting: true } }))).toThrow('unsupported field');
+    expect(() => parseProjectJson(JSON.stringify({ ...legacyProject(project, 2), loot: { ...project.loot, maxOpenings: 1000 } }))).toThrow('unsupported field');
+    expect(() => parseProjectJson(JSON.stringify({ ...legacyProject(project, 1), loot: { ...project.loot, maxOpenings: 1000, futureSetting: true } }))).toThrow('unsupported field');
+  });
+
+  it.each(['lootbox', 'reveal'] as const)('starts %s without a default supply cap and round-trips null explicitly', mechanic => {
+    const project = createProject('Unlimited', mechanic, 'existing');
+    expect(project.schemaVersion).toBe(3);
+    expect(project.collection.maxSupply).toBeNull();
+    expect(parseProjectJson(JSON.stringify(project))).toEqual(project);
+    expect(importProjects(JSON.stringify(project))).toEqual([project]);
+    expect(validateProject(project).filter(issue => issue.path === 'collection.maxSupply')).toEqual([]);
+  });
+
+  it.each([257, 1_000_001, Number.MAX_SAFE_INTEGER])('preserves and validates the explicit supply cap %s without arbitrary collection limits', maxSupply => {
+    for (const mechanic of ['lootbox', 'reveal'] as const) {
+      const project = createProject('Large collection', mechanic, 'existing');
+      project.collection.maxSupply = maxSupply;
+      expect(parseProjectJson(JSON.stringify(project)).collection.maxSupply).toBe(maxSupply);
+      expect(validateProject(project).filter(issue => issue.path === 'collection.maxSupply')).toEqual([]);
+      for (const schemaVersion of [1, 2] as const) {
+        const migrated = parseProjectJson(JSON.stringify(legacyProject(project, schemaVersion)));
+        expect(migrated).toEqual(project);
+        expect(migrated.collection.maxSupply).toBe(maxSupply);
+      }
+    }
+  });
+
+  it('keeps an empty limited draft readable while refusing unsafe or nonpositive business caps', () => {
+    const project = createProject('Limited draft', 'reveal', 'existing');
+    for (const value of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      project.collection.maxSupply = value;
+      expect(validateProject(project)).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'collection.maxSupply', severity: 'error' })]));
+    }
+    project.collection.maxSupply = 0;
+    expect(parseProjectJson(JSON.stringify(project))).toEqual(project);
+    for (const schemaVersion of [1, 2] as const) {
+      expect(() => parseProjectJson(JSON.stringify({ ...legacyProject(project, schemaVersion), collection: { ...project.collection, maxSupply: null } }))).toThrow('finite number');
+    }
+    expect(() => parseProjectJson(JSON.stringify({ ...project, collection: { ...project.collection, maxSupply: 'unlimited' } }))).toThrow('finite number');
+  });
+
+  it('validates uncapped premints by safe numeric precision and capped premints against their explicit cap', () => {
+    const project = createProject('Unlimited premint', 'lootbox', 'existing');
+    project.modules.premint = { enabled: true, quantity: 1_000_001, recipient: '0x1111111111111111111111111111111111111111', includeInReveal: true };
+    expect(validateProject(project).filter(issue => issue.path === 'modules.premint.quantity')).toEqual([]);
+    project.modules.premint.quantity = Number.MAX_SAFE_INTEGER;
+    expect(validateProject(project).filter(issue => issue.path === 'modules.premint.quantity')).toEqual([]);
+    for (const quantity of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      project.modules.premint.quantity = quantity;
+      expect(validateProject(project)).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'modules.premint.quantity', severity: 'error' })]));
+    }
+    project.collection.maxSupply = 1_000_001;
+    project.modules.premint.quantity = 1_000_001;
+    expect(validateProject(project).filter(issue => issue.path === 'modules.premint.quantity')).toEqual([]);
+    project.modules.premint.quantity++;
+    expect(validateProject(project)).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'modules.premint.quantity', severity: 'error' })]));
+  });
+
+  it.each(['shuffle', 'offset', 'token-hash'] as const)('round-trips reveal mode %s without imposing a collection cap', mode => {
+    const project = createProject('Reveal mode', 'reveal', 'existing');
+    project.reveal.mode = mode;
+    for (const maxSupply of [null, 1_000_001]) {
+      project.collection.maxSupply = maxSupply;
+      expect(parseProjectJson(JSON.stringify(project))).toEqual(project);
+      expect(importProjects(JSON.stringify(project))).toEqual([project]);
+      expect(validateProject(project).filter(issue => ['reveal.mode', 'collection.maxSupply'].includes(issue.path))).toEqual([]);
+    }
+  });
+
+  it.each([1, 2] as const)('defaults actual schema %s projects to shuffle while preserving their other choices', schemaVersion => {
+    const current = createProject('Legacy mode', 'reveal', 'existing');
+    current.collection.maxSupply = 256;
+    current.modules.premint = { enabled: true, quantity: 3, recipient: '0x1111111111111111111111111111111111111111', includeInReveal: false };
+    const legacy = legacyProject(current, schemaVersion);
+    expect(legacy).not.toHaveProperty('reveal');
+    const migrated = parseProjectJson(JSON.stringify(legacy));
+    expect(migrated).toEqual(current);
+    expect(migrated.reveal.mode).toBe('shuffle');
+    expect(() => parseProjectJson(JSON.stringify({ ...legacy, reveal: { mode: 'offset' } }))).toThrow('unsupported field');
+  });
+
+  it('requires an exact schema 3 reveal mode and rejects unknown reveal fields', () => {
+    const project = createProject('Current mode', 'reveal');
+    expect(project.reveal.mode).toBe('shuffle');
+    const { reveal: _reveal, ...missing } = project;
+    expect(() => parseProjectJson(JSON.stringify(missing))).toThrow('reveal');
+    for (const reveal of [{}, { mode: 'unknown' }, { mode: 'index-offset' }, { mode: null }, { mode: 'shuffle', futureSetting: true }]) {
+      expect(() => parseProjectJson(JSON.stringify({ ...project, reveal }))).toThrow();
+    }
+    project.reveal.mode = 'unknown' as StudioProject['reveal']['mode'];
+    expect(validateProject(project)).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'reveal.mode', severity: 'error' })]));
   });
 });

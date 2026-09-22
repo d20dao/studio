@@ -7,13 +7,14 @@ import type { StudioProject } from '../src/core/types';
 
 function project(overrides: Partial<StudioProject> = {}): StudioProject {
   return {
-    schemaVersion: 2, id: 'studio-test-project', name: 'Ancient Chest', mechanic: 'lootbox', integration: 'new', network: 'arc-testnet',
+    schemaVersion: 3, id: 'studio-test-project', name: 'Ancient Chest', mechanic: 'lootbox', integration: 'new', network: 'arc-testnet',
     createdAt: '2026-09-22T00:00:00.000Z', updatedAt: '2026-09-22T00:00:00.000Z', isExample: false,
     collection: { name: 'Ancient Collection', symbol: 'AC', standard: 'erc1155', maxSupply: 64, metadataBaseUri: 'ipfs://collection/' },
     loot: { items: [
       { id: 'common', name: 'Common', metadataUri: 'ipfs://common', weight: 600 },
       { id: 'rare', name: 'Rare', metadataUri: 'ipfs://rare', weight: 400 },
     ] },
+    reveal: { mode: 'shuffle' },
     modules: { premint: { enabled: false, quantity: 0, recipient: '', includeInReveal: true }, royalty: { enabled: false, bps: 0, recipient: '' } },
     payment: { price: '0', rngPayer: 'user', refundRecipient: 'payer', refundAddress: '', recovery: 'both', applicationRefund: 'refund-on-expiry' },
     ...overrides,
@@ -21,6 +22,41 @@ function project(overrides: Partial<StudioProject> = {}): StudioProject {
 }
 
 describe('project generation', () => {
+  it.each(['new', 'existing'] as const)('changes %s source and agent instructions for each reveal mode', async integration => {
+    const fingerprints = new Set<string>();
+    for (const mode of ['shuffle', 'offset', 'token-hash'] as const) {
+      const input = project({ mechanic: 'reveal', integration, reveal: { mode } });
+      input.collection.standard = 'erc721';
+      input.collection.maxSupply = null;
+      const bundle = await generateProject(input);
+      expect(bundle.kind).toBe('starter');
+      fingerprints.add(bundle.fingerprint);
+      const files = Object.fromEntries(bundle.files.map(file => [file.path, file.content]));
+      const source = files['contracts/D20RevealStarter.sol'];
+      for (const path of ['AGENTS.md', 'AGENT_PROMPT.md', 'README.md']) {
+        expect(files[path]).toContain(`Selected reveal mode: ${mode}.`);
+        expect(files[path]).toContain('Unlimited; no total mint cap.');
+      }
+      expect(JSON.parse(files['package.json']).dependencies['@openzeppelin/contracts']).toBe('5.6.1');
+      if (mode === 'shuffle') {
+        expect(source).toContain('Operation.Shuffle');
+        expect(source).toContain('function assignment(');
+        expect(source).not.toContain('function tokenHash(');
+        expect(files['AGENTS.md']).toContain('not one global shuffle');
+      } else if (mode === 'offset') {
+        expect(source).toContain('Operation.NumberRange');
+        expect(source).toContain('function offset(');
+        expect(source).not.toContain('Operation.Shuffle');
+        expect(files['AGENTS.md']).toContain('cyclic rotation, not a full shuffle');
+      } else {
+        expect(source).toContain('.requestRandomness{value: msg.value}');
+        expect(source).not.toContain('.requestMappedRandomness{value: msg.value}');
+        expect(files['AGENTS.md']).toContain('this alone does not generate random traits');
+        expect(JSON.parse(files['GENERATION-MANIFEST.json']).integrationRequired).toContain('seed-driven traits and deterministic metadata rendering/publication; validate host token membership');
+      }
+    }
+    expect(fingerprints.size).toBe(3);
+  });
   it.each(['new', 'existing'] as const)('exports %s loot without a separate opening quota', async integration => {
     const input = project({ integration });
     const bundle = await generateProject(input);
@@ -47,7 +83,7 @@ describe('project generation', () => {
     const changed = await generateProject({ ...input, name: 'Different collection' });
     expect(changed.fingerprint).not.toBe(first.fingerprint);
     const manifest = JSON.parse(first.files.find((file) => file.path === 'GENERATION-MANIFEST.json')!.content);
-    expect(manifest.versions).toMatchObject({ generator: '0.3.1', sdk: '0.4.0', solc: '0.8.28', evmVersion: 'cancun' });
+    expect(manifest.versions).toMatchObject({ generator: '0.4.0', sdk: '0.4.0', solc: '0.8.28', evmVersion: 'cancun' });
     expect(manifest.checks.solidityCompilation).toBe('not-run-by-generator');
   });
 
@@ -149,14 +185,14 @@ describe('project generation', () => {
     expect(output.files.find((file) => file.path === 'AGENT_PROMPT.md')!.content).toContain('Planning export only');
   });
 
-  it('generates a bounded reveal consumer with explicit collection hooks', async () => {
+  it('separates collection supply from per-request reveal batches', async () => {
     const input = project({ mechanic: 'reveal' });
     input.collection.standard = 'erc721';
     const output = await generateProject(input);
     expect(output.kind).toBe('starter');
     const source = output.files.find((file) => file.path === 'contracts/D20RevealStarter.sol')!.content;
-    expect(source).toContain('uint32 public constant POPULATION = 64;');
-    expect(source).toContain('if (requestId != 0 || ready) revert AlreadyRequested();');
+    expect(source).toContain('collection.lockRevealBatch()');
+    expect(source).toContain('if (currentRequestId != 0) revert AlreadyRequested();');
     expect(source).toContain('msg.sender != operator');
     expect(source).not.toContain('function mint');
     const readme = output.files.find((file) => file.path === 'README.md')!.content;
@@ -178,18 +214,24 @@ describe('project generation', () => {
     expect(bundle.files.some(file => file.path === 'contracts/D20LootCollection.sol')).toBe(true);
   });
 
-  it('does not generate a zero-sized reveal when all premints are excluded', async () => {
+  it('explains an all-excluded premint without emitting a zero-sized shuffle constant', async () => {
     const input = project({ mechanic: 'reveal' });
     input.collection.standard = 'erc721';
     input.modules.premint = { enabled: true, quantity: 64, recipient: '0x1111111111111111111111111111111111111111', includeInReveal: false };
     const bundle = await generateProject(input);
-    expect(bundle.kind).toBe('plan');
-    expect(bundle.files.some(file => file.language === 'solidity')).toBe(false);
+    expect(bundle.kind).toBe('starter');
+    expect(bundle.issues.some(issue => issue.path === 'modules.premint.includeInReveal' && issue.severity === 'warning')).toBe(true);
+    expect(bundle.files.find(file => file.path === 'contracts/D20RevealStarter.sol')!.content).not.toContain('POPULATION = 0');
   });
 
-  it.each(['lootbox', 'reveal'] as const)('compiles the %s consumer against the installed pinned SDK', async (mechanic) => {
-    const input = project({ mechanic });
+  it.each([
+    ['lootbox', 'new', 'shuffle'], ['lootbox', 'existing', 'shuffle'],
+    ['reveal', 'new', 'shuffle'], ['reveal', 'new', 'offset'], ['reveal', 'new', 'token-hash'],
+    ['reveal', 'existing', 'shuffle'], ['reveal', 'existing', 'offset'], ['reveal', 'existing', 'token-hash'],
+  ] as const)('compiles %s / %s / %s against the pinned SDK', async (mechanic, integration, mode) => {
+    const input = project({ mechanic, integration, reveal: { mode } });
     input.collection.standard = mechanic === 'reveal' ? 'erc721' : 'erc1155';
+    input.collection.maxSupply = null;
     const bundle = await generateProject(input);
     const sources = Object.fromEntries(bundle.files.filter((file) => file.language === 'solidity').map((file) => [file.path, { content: file.content }]));
     const allowedImport = (path: string) => /^(?:@d20dao\/vrf-sdk\/contracts\/|@openzeppelin\/contracts\/)[A-Za-z0-9_./-]+\.sol$/.test(path) && !path.split('/').includes('..');

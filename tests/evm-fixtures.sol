@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {RandomnessMapping} from "@d20dao/vrf-sdk/contracts/libraries/RandomnessMapping.sol";
 import {ID20VRFConsumer, ID20VRFRefundConsumer} from "@d20dao/vrf-sdk/contracts/interfaces/ID20VRF.sol";
 import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 /// @dev Local lifecycle double. It does NOT implement or claim VRF cryptographic verification.
 ///      Production coordinator behavior is separately implemented by the pinned D20DAO protocol.
@@ -11,7 +12,7 @@ contract LifecycleCoordinator {
     uint256 public constant FEE = 1000;
     struct Request {
         address consumer; address recipient; uint64 deadline; uint32 gasLimit;
-        bytes32 word; bool accepted; bool delivered; bool refunded; bool notified;
+        bytes32 word; bool accepted; bool delivered; bool refunded; bool notified; bytes32 clientSeed;
     }
     mapping(uint256 => Request) public requests;
     mapping(uint256 => RandomnessMapping.Spec) private _specs;
@@ -26,13 +27,26 @@ contract LifecycleCoordinator {
     function quoteFee(uint32) external pure returns (uint256) { return FEE; }
     function setDelayNotification(bool delay) external { delayNotification = delay; }
 
-    function requestMappedRandomness(bytes32, uint32 gasLimit, address recipient, RandomnessMapping.Spec calldata spec)
+    function requestMappedRandomness(bytes32 clientSeed, uint32 gasLimit, address recipient, RandomnessMapping.Spec calldata spec)
         external payable nonReentrant returns (uint256 id)
+    {
+        return _request(clientSeed, gasLimit, recipient, spec);
+    }
+
+    function requestRandomness(bytes32 clientSeed, uint32 gasLimit, address recipient)
+        external payable nonReentrant returns (uint256 id)
+    {
+        RandomnessMapping.Spec memory raw = RandomnessMapping.Spec(RandomnessMapping.Operation.Raw, 0, 0, 0, 0);
+        return _request(clientSeed, gasLimit, recipient, raw);
+    }
+
+    function _request(bytes32 clientSeed, uint32 gasLimit, address recipient, RandomnessMapping.Spec memory spec)
+        private returns (uint256 id)
     {
         require(msg.value >= FEE && recipient != address(0), "fee");
         RandomnessMapping.validate(spec);
         id = nextId++;
-        requests[id] = Request(msg.sender, recipient, uint64(block.timestamp + 60), gasLimit, bytes32(0), false, false, false, false);
+        requests[id] = Request(msg.sender, recipient, uint64(block.timestamp + 60), gasLimit, bytes32(0), false, false, false, false, clientSeed);
         _specs[id] = spec;
         refundCredit[recipient] += msg.value - FEE;
     }
@@ -151,6 +165,49 @@ contract ReentrantRewardReceiver is ERC1155Holder {
         try IOpeningForTest(_consumer).setDeliveryRecipient(_requestId, _replacement) { redirectSucceeded = true; } catch {}
         try IOpeningForTest(_consumer).deliver(_requestId) { duplicateDeliverySucceeded = true; } catch {}
         return this.onERC1155Received.selector;
+    }
+}
+
+interface IRevealCollectionForTest {
+    function setController(address consumer) external;
+    function mintPremint(uint256 quantity) external;
+    function mint(address recipient, uint256 quantity) external;
+    function closeMint() external;
+}
+interface IRevealConsumerForTest {
+    function requestReveal() external payable returns (uint256);
+    function finalizeReveal(uint256 requestId) external;
+}
+
+/// @dev Owner/operator NFT receiver probes protected collection transitions from inside a safe-mint hook.
+contract RevealHookOwner is IERC721Receiver {
+    address public immutable owner = msg.sender;
+    IRevealCollectionForTest private _collection;
+    IRevealConsumerForTest private _consumer;
+    uint256 public finalizeAttempt;
+    bool public closeReentered;
+    bool public mintReentered;
+    bool public requestReentered;
+    bool public finalizeReentered;
+    modifier onlyOwner() { require(msg.sender == owner, "only owner"); _; }
+    function configure(address collection, address consumer) external onlyOwner {
+        _collection = IRevealCollectionForTest(collection);
+        _consumer = IRevealConsumerForTest(consumer);
+        _collection.setController(consumer);
+    }
+    function fund() external payable {}
+    function mintPremint(uint256 quantity) external onlyOwner { _collection.mintPremint(quantity); }
+    function mint(uint256 quantity) external onlyOwner { _collection.mint(address(this), quantity); }
+    function request() external payable onlyOwner returns (uint256) { return _consumer.requestReveal{value: msg.value}(); }
+    function setFinalizeAttempt(uint256 requestId) external onlyOwner { finalizeAttempt = requestId; }
+    function onERC721Received(address, address, uint256, bytes calldata) external returns (bytes4) {
+        try _collection.closeMint() { closeReentered = true; } catch {}
+        try _collection.mint(address(this), 1) { mintReentered = true; } catch {}
+        try _consumer.requestReveal{value: 1000}() returns (uint256) { requestReentered = true; } catch {}
+        if (finalizeAttempt != 0) {
+            try _consumer.finalizeReveal(finalizeAttempt) { finalizeReentered = true; } catch {}
+        }
+        return this.onERC721Received.selector;
     }
 }
 

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { createProject } from '../src/core/project';
 import { loadWorkspace, saveBrowserWorkspace, saveWorkspace, WORKSPACE_KEY, type StorageAdapter, type WorkspaceLocks } from '../src/core/storage';
+import type { StudioProject } from '../src/core/types';
+
+function legacyProject(project: StudioProject, schemaVersion: 1 | 2) {
+  const { reveal: _reveal, ...previous } = project;
+  return { ...previous, schemaVersion };
+}
 
 function memory(initial: string | null = null): StorageAdapter & { values: Map<string, string> } {
   const values = new Map<string, string>();
@@ -126,6 +132,7 @@ describe('local workspace persistence', () => {
 
   it('migrates legacy records in memory and preserves the raw snapshot until a normal save', () => {
     const current = createProject('Full legacy project', 'lootbox', 'existing');
+    current.collection.maxSupply = 128;
     current.createdAt = '2026-09-22T01:02:03.004Z';
     current.updatedAt = '2026-09-22T05:06:07.008Z';
     current.modules.premint = { enabled: true, quantity: 8, recipient: '0x1111111111111111111111111111111111111111', includeInReveal: false };
@@ -133,7 +140,7 @@ describe('local workspace persistence', () => {
     current.payment = { price: '1.250000000000000001', rngPayer: 'developer', refundRecipient: 'custom', refundAddress: '0x3333333333333333333333333333333333333333', recovery: 'developer', applicationRefund: 'developer-defined' };
     current.loot.items[1].metadataUri = 'ipfs://retained/metadata.json';
     current.loot.items[1].tokenId = '9007199254740993';
-    const legacy = { ...current, schemaVersion: 1, loot: { ...current.loot, maxOpenings: 1000 } };
+    const legacy = { ...legacyProject(current, 1), loot: { ...current.loot, maxOpenings: 1000 } };
     const other = createProject('Already current', 'reveal');
     const original = JSON.stringify({ schemaVersion: 1, revision: 7, projects: [legacy, other] });
     const storage = memory(original);
@@ -144,15 +151,16 @@ describe('local workspace persistence', () => {
     expect(saveWorkspace(loaded.projects, { expectedSnapshot: loaded.snapshot }, storage)).toMatchObject({ ok: true, revision: 8 });
     const saved = storage.getItem(WORKSPACE_KEY)!;
     expect(saved).not.toContain('maxOpenings');
-    expect(JSON.parse(saved)).toMatchObject({ schemaVersion: 1, projects: [{ schemaVersion: 2 }, { schemaVersion: 2 }] });
+    expect(JSON.parse(saved)).toMatchObject({ schemaVersion: 1, projects: [{ schemaVersion: 3 }, { schemaVersion: 3 }] });
     expect(loadWorkspace(storage).projects).toEqual([current, other]);
     expect(WORKSPACE_KEY).toBe('d20dao.studio.workspace.v1');
   });
 
   it('keeps malformed legacy records intact and refuses an ordinary overwrite after partial migration', () => {
     const current = createProject('Good legacy', 'lootbox');
-    const good = { ...current, schemaVersion: 1, loot: { ...current.loot, maxOpenings: 1000 } };
-    const broken = { ...createProject('Malformed legacy', 'reveal'), schemaVersion: 1, loot: { items: [], maxOpenings: 'not a number' } };
+    current.collection.maxSupply = 128;
+    const good = { ...legacyProject(current, 1), loot: { ...current.loot, maxOpenings: 1000 } };
+    const broken = { ...legacyProject(createProject('Malformed legacy', 'reveal'), 1), loot: { items: [], maxOpenings: 'not a number' } };
     const original = JSON.stringify({ schemaVersion: 1, projects: [good, broken] });
     const storage = memory(original);
     const loaded = loadWorkspace(storage);
@@ -161,5 +169,49 @@ describe('local workspace persistence', () => {
     expect(loaded.snapshot).toBe(original);
     expect(saveWorkspace(loaded.projects, { expectedSnapshot: original }, storage)).toMatchObject({ ok: false, reason: 'recovery-required' });
     expect(storage.getItem(WORKSPACE_KEY)).toBe(original);
+  });
+
+  it('retains v1/v2 collection caps beside unlimited v3 projects through the first migrated save', () => {
+    const versionOne = createProject('Legacy 128 cap', 'reveal', 'existing');
+    versionOne.collection.maxSupply = 128;
+    versionOne.isExample = true;
+    const versionTwo = createProject('Legacy large cap', 'lootbox', 'existing');
+    versionTwo.collection.maxSupply = 1_000_001;
+    const unlimited = createProject('No cap', 'reveal', 'existing');
+    unlimited.reveal.mode = 'token-hash';
+    const original = JSON.stringify({ schemaVersion: 1, projects: [
+      { ...legacyProject(versionOne, 1), loot: { ...versionOne.loot, maxOpenings: 1000 } },
+      legacyProject(versionTwo, 2),
+      unlimited,
+    ] });
+    const storage = memory(original);
+    const loaded = loadWorkspace(storage);
+    expect(loaded.error).toBeUndefined();
+    expect(loaded.projects).toEqual([versionOne, versionTwo, unlimited]);
+    expect(loaded.projects.map(project => project.collection.maxSupply)).toEqual([128, 1_000_001, null]);
+    expect(loaded.projects.map(project => project.reveal.mode)).toEqual(['shuffle', 'shuffle', 'token-hash']);
+    expect(storage.getItem(WORKSPACE_KEY)).toBe(original);
+    expect(saveWorkspace(loaded.projects, { expectedSnapshot: original }, storage).ok).toBe(true);
+    expect(loadWorkspace(storage).projects).toEqual([versionOne, versionTwo, unlimited]);
+    expect(JSON.parse(storage.getItem(WORKSPACE_KEY)!).projects.every((project: { schemaVersion: number }) => project.schemaVersion === 3)).toBe(true);
+  });
+
+  it('persists all current reveal modes and preserves malformed mode records for recovery', () => {
+    const projects = (['shuffle', 'offset', 'token-hash'] as const).map(mode => {
+      const project = createProject(mode, 'reveal', 'existing');
+      project.reveal.mode = mode;
+      return project;
+    });
+    const storage = memory();
+    expect(saveWorkspace(projects, { expectedSnapshot: null }, storage).ok).toBe(true);
+    expect(loadWorkspace(storage).projects).toEqual(projects);
+    const invalid = { ...createProject('Unsupported mode', 'reveal'), reveal: { mode: 'future-mode' } };
+    const original = JSON.stringify({ schemaVersion: 1, projects: [...projects, invalid] });
+    const recovery = memory(original);
+    const loaded = loadWorkspace(recovery);
+    expect(loaded.projects).toEqual(projects);
+    expect(loaded.rejectedProjects).toBe(1);
+    expect(saveWorkspace(loaded.projects, { expectedSnapshot: original }, recovery)).toMatchObject({ ok: false, reason: 'recovery-required' });
+    expect(recovery.getItem(WORKSPACE_KEY)).toBe(original);
   });
 });

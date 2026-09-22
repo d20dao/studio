@@ -25,11 +25,11 @@ export function Field({ label, children, hint, help, path }: { label: string; ch
   return <div className="field"><div className="field-heading"><label htmlFor={id}>{label}</label>{help && <FieldHelp label={label}>{help}</FieldHelp>}</div>{control}{hint && <small id={`${id}-hint`}>{hint}</small>}</div>;
 }
 
-export function NumberField({ label, value, onChange, min = 0, max, step = 1, report, fieldKey, help, path }: { label: string; value: number; onChange: (n: number) => void; min?: number; max?: number; step?: number; report: (key: string, invalid: boolean) => void; fieldKey: string; help?: ReactNode; path?: string }) {
-  const [raw, setRaw] = useState(String(value));
+export function NumberField({ label, value, onChange, min = 0, max, step = 1, report, fieldKey, help, path, emptyWhenZero = false, placeholder }: { label: string; value: number; onChange: (n: number) => void; min?: number; max?: number; step?: number; report: (key: string, invalid: boolean) => void; fieldKey: string; help?: ReactNode; path?: string; emptyWhenZero?: boolean; placeholder?: string }) {
+  const [raw, setRaw] = useState(emptyWhenZero && value === 0 ? '' : String(value));
   const id = useId();
   const invalid = raw.trim() === '' || !Number.isFinite(Number(raw)) || Number(raw) < min || (max !== undefined && Number(raw) > max) || (step === 1 && !Number.isSafeInteger(Number(raw)));
-  return <div className="field"><div className="field-heading"><label htmlFor={id}>{label}</label>{help && <FieldHelp label={label}>{help}</FieldHelp>}</div><input id={id} data-field-path={path} data-field-key={fieldKey} type="number" value={raw} min={min} max={max} step={step} aria-invalid={invalid} aria-describedby={invalid ? `${id}-error` : undefined} onChange={e => {
+  return <div className="field"><div className="field-heading"><label htmlFor={id}>{label}</label>{help && <FieldHelp label={label}>{help}</FieldHelp>}</div><input id={id} data-field-path={path} data-field-key={fieldKey} type="number" value={raw} min={min} max={max} step={step} placeholder={placeholder} aria-invalid={invalid} aria-describedby={invalid ? `${id}-error` : undefined} onChange={e => {
     const next = e.target.value;
     setRaw(next);
     const n = Number(next);

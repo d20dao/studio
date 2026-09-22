@@ -4,7 +4,7 @@ import { effectiveTokenId, nftFiles } from '../templates/nft';
 
 const SDK_VERSION = '0.4.0';
 const SOLC_VERSION = '0.8.28';
-const TEMPLATE_VERSION = '0.3.1';
+const TEMPLATE_VERSION = '0.4.0';
 const OPENZEPPELIN_VERSION = '5.6.1';
 
 const DEPLOYMENT_REFERENCES = {
@@ -151,26 +151,62 @@ contract D20LootStarter is D20VRFConsumer {
 }
 
 function revealSource(project: StudioProject, fingerprint: string): string {
+  const mode = project.reveal.mode;
+  const request = mode === 'token-hash'
+    ? `id = ID20VRF(vrfCoordinator).requestRandomness{value: msg.value}(keccak256(abi.encode(CONFIG_DIGEST, batchKey, population)), CALLBACK_GAS, msg.sender);`
+    : `RandomnessMapping.Spec memory spec = ${mode === 'shuffle'
+      ? 'RandomnessMapping.Spec(RandomnessMapping.Operation.Shuffle, 0, 0, uint32(population), uint32(population))'
+      : 'RandomnessMapping.Spec(RandomnessMapping.Operation.NumberRange, 0, population - 1, 1, 0)'};
+        id = ID20VRF(vrfCoordinator).requestMappedRandomness{value: msg.value}(
+            keccak256(abi.encode(CONFIG_DIGEST, batchKey, population)), CALLBACK_GAS, msg.sender, spec
+        );`;
+  const result = mode === 'shuffle'
+    ? `/// @notice Batch-local indices. Reading them does not update the host collection's metadata.
+    function assignment(uint256 requestId) external view returns (uint256[] memory) {
+        if (!reveals[requestId].ready) revert NotReady();
+        return ID20VRF(vrfCoordinator).getMappedResult(requestId);
+    }`
+    : mode === 'offset'
+      ? `/// @notice Unbiased cyclic offset, not a full shuffle. The host applies it to its frozen list.
+    function offset(uint256 requestId) public view returns (uint256) {
+        if (!reveals[requestId].ready) revert NotReady();
+        return ID20VRF(vrfCoordinator).getMappedResult(requestId)[0];
+    }
+    function metadataIndex(uint256 requestId, uint256 localIndex) external view returns (uint256) {
+        uint256 population = reveals[requestId].population;
+        if (localIndex >= population) revert InvalidBatch();
+        return addmod(localIndex, offset(requestId), population);
+    }`
+      : `/// @notice Seed customization hook. The host must validate token membership and implement traits/rendering.
+    function tokenHash(uint256 requestId, uint256 tokenId) external view returns (bytes32) {
+        if (!reveals[requestId].ready) revert NotReady();
+        return keccak256(abi.encode(keccak256("D20DAO_STUDIO_TOKEN_HASH_V1"), block.chainid, address(this), CONFIG_DIGEST, reveals[requestId].word, tokenId));
+    }`;
   return `${imports}
-/// @notice One abstract reveal group. Connect a collection and its frozen token/metadata lists separately.
-/// @dev The operator must close eligibility before requesting. No NFT metadata or mint rights are changed here.
-contract D20RevealStarter is D20VRFConsumer {
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+/// @notice Reusable reveal batches; connect the host's frozen token and metadata lists separately.
+/// @dev A batchKey must commit to a canonical, non-overlapping host batch before requesting.
+contract D20RevealStarter is D20VRFConsumer, ReentrancyGuard {
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
     uint32 public constant CALLBACK_GAS = 100_000;
-    uint32 public constant POPULATION = ${project.collection.maxSupply};
+${mode === 'shuffle' ? `    // This is the pinned SDK's per-shuffle bound, not a collection supply limit.
+    uint32 public constant MAX_BATCH_SIZE = 256;` : ''}
     address public immutable operator;
-    uint256 public requestId;
-    bytes32 public word;
-    bool public ready;
+    struct RevealAttempt { bytes32 batchKey; uint256 population; bytes32 word; bool ready; bool refunded; }
+    mapping(uint256 => RevealAttempt) public reveals;
+    mapping(bytes32 => uint256) public requestForBatch;
+    mapping(bytes32 => uint256) public populationForBatch;
 
     error OnlyOperator();
     error InvalidOperator();
+    error InvalidBatch();
     error AlreadyRequested();
     error Underpaid(uint256 required, uint256 sent);
     error UnexpectedCallback();
     error NotReady();
 
-    event RevealRequested(uint256 indexed requestId);
+    event RevealRequested(bytes32 indexed batchKey, uint256 indexed requestId, uint256 population);
     event RevealReady(uint256 indexed requestId, bytes32 word);
     event RevealAttemptRefunded(uint256 indexed requestId);
 
@@ -180,40 +216,40 @@ contract D20RevealStarter is D20VRFConsumer {
     }
 
     /// @dev RNG-only payment; the caller is the fixed protocol refund recipient.
-    function requestReveal() external payable returns (uint256 id) {
+    function requestReveal(bytes32 batchKey, uint256 population) external payable nonReentrant returns (uint256 id) {
         if (msg.sender != operator) revert OnlyOperator();
-        if (requestId != 0 || ready) revert AlreadyRequested();
+        if (batchKey == bytes32(0) || population == 0${mode === 'shuffle' ? ' || population > MAX_BATCH_SIZE' : ''}) revert InvalidBatch();
+        uint256 previous = requestForBatch[batchKey];
+        if (previous != 0) {
+            if (!reveals[previous].refunded) revert AlreadyRequested();
+            if (populationForBatch[batchKey] != population) revert InvalidBatch();
+        } else populationForBatch[batchKey] = population;
         uint256 fee = ID20VRF(vrfCoordinator).quoteFee(CALLBACK_GAS);
         if (msg.value < fee) revert Underpaid(fee, msg.value);
-        RandomnessMapping.Spec memory spec = RandomnessMapping.Spec(
-            RandomnessMapping.Operation.Shuffle, 0, 0, POPULATION, POPULATION
-        );
-        id = ID20VRF(vrfCoordinator).requestMappedRandomness{value: msg.value}(
-            CONFIG_DIGEST, CALLBACK_GAS, msg.sender, spec
-        );
-        requestId = id;
-        emit RevealRequested(id);
+        ${request}
+        reveals[id] = RevealAttempt(batchKey, population, bytes32(0), false, false);
+        requestForBatch[batchKey] = id;
+        emit RevealRequested(batchKey, id, population);
     }
 
     function _fulfillRandomness(uint256 id, bytes32 randomness) internal override {
-        if (id == 0 || id != requestId || ready) revert UnexpectedCallback();
-        word = randomness;
-        ready = true;
+        RevealAttempt storage attempt = reveals[id];
+        if (attempt.batchKey == bytes32(0) || attempt.ready || attempt.refunded || requestForBatch[attempt.batchKey] != id) revert UnexpectedCallback();
+        attempt.word = randomness;
+        attempt.ready = true;
         emit RevealReady(id, randomness);
     }
 
     function _onRefund(uint256 id) internal override {
-        if (id == 0 || id != requestId || ready) revert UnexpectedCallback();
-        // Only a coordinator-authenticated, settled refund unlocks another attempt.
-        requestId = 0;
+        RevealAttempt storage attempt = reveals[id];
+        if (attempt.batchKey == bytes32(0) || attempt.ready || requestForBatch[attempt.batchKey] != id) revert UnexpectedCallback();
+        if (attempt.refunded) return;
+        // The same batchKey must keep the original population and frozen host lists.
+        attempt.refunded = true;
         emit RevealAttemptRefunded(id);
     }
 
-    /// @notice Indices 0..POPULATION-1. Reading them does not update collection metadata.
-    function assignment() external view returns (uint256[] memory) {
-        if (!ready) revert NotReady();
-        return ID20VRF(vrfCoordinator).getMappedResult(requestId);
-    }
+    ${result}
 }
 `;
 }
@@ -227,6 +263,7 @@ function integrationNotes(project: StudioProject): string {
       : 'New-project wiring: construct D20RevealCollection(initialOwner), then D20RevealStarter(coordinator, collectionAddress, operator). The explicit initialOwner calls collection.setController(consumerAddress) once. Owner and operator must be deliberate addresses even when a factory creates these contracts. This exports an actual ERC-721 collection and its reveal consumer.';
   const selectedFeatures = [
     target,
+    `Selected collection supply: ${project.collection.maxSupply === null ? 'Unlimited; no total mint cap.' : `Limited to ${project.collection.maxSupply} total NFT units, including premints.`} Reveal request size is independent of collection supply.`,
     isNew
       ? `Selected collection standard: ${project.collection.standard}. Collection supply and metadata getters are implemented; delivery and recovery follow the selected template described below. Provide the final hosted metadata before generation; no upload occurs and a mutable URI does not establish immutable content.`
       : `Selected collection standard: ${project.collection.standard}. Supply accounting, canonical token IDs, image/metadata hosting, and asset delivery remain integration work.`,
@@ -238,8 +275,8 @@ function integrationNotes(project: StudioProject): string {
     project.modules.premint.enabled
       ? isNew
         ? project.mechanic === 'lootbox'
-          ? 'Premint enabled: the configured quantity is minted to its recipient during collection construction, using the first configured item token ID. It counts against maxSupply. Loot has no reveal pool; includeInReveal is preserved as configuration but has no loot behavior.'
-          : 'Premint enabled: sequential token IDs beginning at zero are minted to the configured recipient during collection construction and count against maxSupply. Included premints participate in the full shuffle; excluded premints keep their prefix metadata IDs and reduce the shuffled population by their quantity.'
+          ? 'Premint enabled: the configured quantity is minted to its recipient during collection construction, using the first configured item token ID. It counts against the supply cap when one is configured. Loot has no reveal pool; includeInReveal is preserved as configuration but has no loot behavior.'
+          : 'Premint enabled: call mintPremint(quantity) in gas-appropriate transactions to distribute the configured allocation to its fixed recipient before regular minting. The constructor does not loop through the allocation. These tokens count against a configured supply cap. Included premints join reveal batches; excluded premints keep their original prefix metadata.'
         : 'Premint enabled: implement its configured quantity and recipient, reserve supply once, and enforce the selected inclusion/exclusion in the frozen reveal set. No premint is executed by this consumer.'
       : 'Premint disabled: do not create a premint allocation.',
     'Application price: preserve the exact decimal string in studio.project.json; define its currency and base units before implementation. The reference consumer charges only the coordinator RNG fee and does not escrow or collect the selected application price.',
@@ -250,12 +287,16 @@ function integrationNotes(project: StudioProject): string {
     'Pin the chosen network deployment manifest, coordinator implementation, and SDK provenance before use. Arc request fees are native USDC with 18 decimals; no live network configuration was checked during export.',
   ];
   if (project.mechanic === 'lootbox') {
-    selectedFeatures.push('Loot model: one independent weighted draw per action; no per-item finite inventory or multi-reward allocation. Integer weights are fixed in this consumer. Bind an authenticated game/opening entitlement to its canonical actionId when your game requires one; a caller-chosen ID alone does not prove entitlement. There is no separate lifetime opening quota. Settled expired attempts can retry the same action; pending or accepted actions cannot be requested again. New collections enforce their total supply, including premints and reservations; existing-project adapters require host inventory and eligibility checks.');
+    selectedFeatures.push('Loot model: one independent weighted draw per action; no per-item finite inventory or multi-reward allocation. Integer weights are fixed in this consumer. Bind an authenticated game/opening entitlement to its canonical actionId when your game requires one; a caller-chosen ID alone does not prove entitlement. There is no separate lifetime opening quota. Settled expired attempts can retry the same action; pending or accepted actions cannot be requested again. New collections enforce a supply cap only when configured, including premints and reservations; existing-project adapters require host inventory and eligibility checks.');
     if (isNew) selectedFeatures.push('Reward delivery: open(actionId) reserves one unit for the caller; openTo(actionId, recipient) records a separate NFT recipient for contracts that cannot receive ERC-1155 tokens. RNG refunds still go to the original caller. Anyone can call deliver(requestId) after the small callback, but cannot choose its recipient or token. If delivery fails, only the original requester can call setDeliveryRecipient(requestId, recipient) for an accepted, undelivered request; the accepted word, action, selected token and supply reservation remain unchanged. Integrating contracts must expose this recovery call or choose a compatible recipient up front. Never cancel an accepted reward to reroll it. A settled expiry refund notification releases the reservation; retrying that expired action must acquire capacity again and can fail if the collection has since filled. Token IDs are each explicit decimal tokenId, or the zero-based item-row index when omitted. Each URI is exactly that item\'s metadataUri and must be configured before generation. There is no owner mint beyond configured constructor premint and consumer delivery.');
   } else {
+    selectedFeatures.push(`Selected reveal mode: ${project.reveal.mode}. This choice is fixed in the generated contract; changing a Studio setting does not change a deployed contract.`);
     selectedFeatures.push(isNew
-      ? 'Reveal model: owner distributes the remaining ERC-721 supply via mint(recipient, quantity), at most 64 per call, then closeMint() after every configured token is minted. Token IDs are 0..maxSupply-1. The operator requests only after closure. Anyone can call finalizeReveal() after callback; it installs the accepted permutation exactly once. The shuffled range starts after excluded premints; included premints start at index zero. tokenURI is empty until reveal, except excluded premints; final URI is metadataBaseUri + metadataIndex + ".json". The prefix and rule have no setters. Set a lower maxSupply before generation if you intend to reveal a smaller collection; partial-supply closure is deliberately unsupported.'
-      : 'Reveal model: an abstract shuffle of collection.maxSupply indices, at most 256. Supply is not a query of an existing collection. Freeze and verify the exact ordered eligible token IDs and metadata before requesting; connect the returned indices to those lists and the collection reveal hook. Premint exclusion may require a smaller population and a reviewed regenerated consumer. A config digest alone does not freeze a collection or immutable metadata content.');
+      ? 'Reveal lifecycle: after distributing any staged premint, the owner mints sequential IDs with mint(recipient, quantity). Choose gas-appropriate transaction sizes; there is no fixed 64-token mint batch cap. Minting may continue during reveal; closeMint() optionally ends minting below any configured cap. The operator calls requestReveal() to freeze the next contiguous already-minted range. Finish the accepted batch with permissionless finalizeReveal(requestId) before requesting the next. reveals(requestId) preserves its range and evidence. Expired retries use the same frozen range even when more tokens mint. Excluded premints retain their original prefix metadata. tokenURI is empty for unrevealed tokens and uses the fixed metadataBaseUri plus the selected mode\'s index and ".json" after finalization.'
+      : 'Reveal lifecycle: call requestReveal(batchKey, population) for each canonical host batch. The host must commit batchKey to its exact ordered eligible token IDs and metadata, prevent overlapping or renamed batches from rerolling the same NFTs, and apply the selected result to that frozen list. This adapter does not freeze or query an existing collection itself. An expired batch keeps its original population on retry; accepted batches cannot be requested again. Premint inclusion/exclusion and all collection mint rights remain host integration work.');
+    if (project.reveal.mode === 'shuffle') selectedFeatures.push('Shuffle mode: each request covers up to 256 tokens, the pinned SDK\'s per-shuffle bound, independent of collection supply. Read assignment(requestId). Each frozen batch has its own permutation, not one global shuffle. For new collections, tokenURI uses metadataBaseUri + (batch.start + assignment[localIndex]) + ".json".');
+    else if (project.reveal.mode === 'offset') selectedFeatures.push('Index offset mode: each new-collection request freezes all currently minted unrevealed tokens. RequestMappedRandomness uses NumberRange from 0 to count-1, so the SDK provides the offset without direct word-modulo bias. Read offset(requestId); a new collection maps each token to batch.start + addmod(tokenId-batch.start, offset, count). The existing adapter\'s metadataIndex(requestId, localIndex) returns the batch-local index. This is a cyclic rotation, not a full shuffle. There is no 256-token shuffle bound for this mode.');
+    else selectedFeatures.push('Per-token hash mode: each new-collection request freezes all currently minted unrevealed tokens and requests a raw VRF word. The new collection exposes tokenHash(tokenId) after finalization; the existing adapter exposes tokenHash(requestId, tokenId), with host membership checks still required. The hash is keccak256(abi.encode(keccak256("D20DAO_STUDIO_TOKEN_HASH_V1"), block.chainid, address(this), CONFIG_DIGEST, acceptedWord, tokenId)). address(this) is the contract exposing that getter. Zero is a valid accepted word. Hashes are deterministic seeds, not a unique metadata assignment. New-collection tokenURI remains metadataBaseUri + tokenId + ".json"; this alone does not generate random traits. Implement seed-driven onchain rendering, a deterministic metadata renderer, or a reviewed publication workflow before use. Prewritten immutable IPFS metadata cannot automatically acquire later hash-derived traits. Excluded premints have identity metadata and no randomized hash. There is no 256-token shuffle bound for this mode.');
   }
   return selectedFeatures.map((note) => `- ${note}`).join('\n');
 }
@@ -278,6 +319,13 @@ export async function generateProject(project: StudioProject): Promise<Generated
   const className = project.mechanic === 'reveal' ? 'D20RevealStarter' : 'D20LootStarter';
   const contractPath = `contracts/${className}.sol`;
   const isNew = project.integration === 'new';
+  const usesOpenZeppelin = isNew || project.mechanic === 'reveal';
+  const revealDescription = project.reveal.mode === 'shuffle' ? 'batch shuffle request/result consumer' : project.reveal.mode === 'offset' ? 'cyclic index-offset request/result consumer' : 'per-token hash/seed request/result consumer';
+  const existingRevealBehavior = project.reveal.mode === 'shuffle'
+    ? 'assignment(requestId) reads the batch-local permutation.'
+    : project.reveal.mode === 'offset'
+      ? 'offset(requestId) reads the cyclic rotation; metadataIndex(requestId, localIndex) computes a batch-local metadata index.'
+      : 'tokenHash(requestId, tokenId) derives a VRF-bound token seed; traits and metadata rendering are not implemented by this getter.';
   const readiness = kind === 'starter'
     ? isNew
       ? 'Collection + VRF starter generated. Standard NFT behavior, configured royalties/premint and fixed-outcome delivery are implemented. Application sale charges, sponsorship and custom refund routing remain integration hooks when selected. No compile, test, audit, or deployment is claimed by generation.'
@@ -292,7 +340,7 @@ ${readiness}
 
 ${references}
 
-Use @d20dao/vrf-sdk ${SDK_VERSION}, ${isNew ? `@openzeppelin/contracts ${OPENZEPPELIN_VERSION}, ` : ''}Solidity ${SOLC_VERSION}, and EVM target cancun. Read the installed SDK's AGENTS.md, API.md, ABIs, examples, and PROTOCOL-PROVENANCE.json first. Match the selected network's reviewed deployment manifest.
+Use @d20dao/vrf-sdk ${SDK_VERSION}, ${usesOpenZeppelin ? `@openzeppelin/contracts ${OPENZEPPELIN_VERSION}, ` : ''}Solidity ${SOLC_VERSION}, and EVM target cancun. Read the installed SDK's AGENTS.md, API.md, ABIs, examples, and PROTOCOL-PROVENANCE.json first. Match the selected network's reviewed deployment manifest.
 
 The selected mechanic is ${project.mechanic}; the integration target is ${project.integration}. Implement only the selected features. Preserve the original repository's structure for existing-project integrations. Keep unimplemented hooks visible; distinguish the implemented new-collection features from missing sale/sponsorship/custom-refund hooks. An existing-project consumer adapter is not a replacement collection or evidence of external-contract compatibility.
 
@@ -317,7 +365,7 @@ ${context}
   const files: GeneratedFile[] = [
     { path: 'studio.project.json', content: json(project), language: 'json' },
     { path: 'config/items.json', content: json({ schemaVersion: 1, mechanic: project.mechanic, items: project.loot.items, ...(kind === 'starter' && project.mechanic === 'lootbox' ? { effectiveTokenIds: project.loot.items.map(effectiveTokenId) } : {}) }), language: 'json' },
-    { path: 'package.json', content: json({ name: 'd20dao-studio-export', version: '0.1.0', private: true, type: 'module', dependencies: { '@d20dao/vrf-sdk': SDK_VERSION, ...(isNew ? { '@openzeppelin/contracts': OPENZEPPELIN_VERSION } : {}) }, devDependencies: { solc: SOLC_VERSION }, overrides: { solc: { tmp: '0.2.7' } } }), language: 'json' },
+    { path: 'package.json', content: json({ name: 'd20dao-studio-export', version: '0.1.0', private: true, type: 'module', dependencies: { '@d20dao/vrf-sdk': SDK_VERSION, ...(usesOpenZeppelin ? { '@openzeppelin/contracts': OPENZEPPELIN_VERSION } : {}) }, devDependencies: { solc: SOLC_VERSION }, overrides: { solc: { tmp: '0.2.7' } } }), language: 'json' },
     { path: 'README.md', language: 'markdown', content: `# D20DAO integration starter
 
 ${readiness}
@@ -332,10 +380,10 @@ ${references}
 - config/items.json: ordered application item data; no upload or permanent hosting is performed.
 - AGENTS.md and AGENT_PROMPT.md: specific implementation instructions with an inert JSON configuration block.
 - GENERATION-MANIFEST.json: exact template/dependency versions, validation, and honest verification status.
-${kind === 'starter' ? `- ${contractPath}: ${project.mechanic === 'lootbox' ? 'weighted RNG request/result consumer with action tracking' : 'single-group shuffle request/result consumer'}.\n${isNew ? `- contracts/${project.mechanic === 'lootbox' ? 'D20LootCollection' : 'D20RevealCollection'}.sol: actual OpenZeppelin standard NFT collection, fixed configuration and one-time controller wiring.\n` : '- Existing-target adapters do not implement or replace the external collection.\n'}` : ''}
+${kind === 'starter' ? `- ${contractPath}: ${project.mechanic === 'lootbox' ? 'weighted RNG request/result consumer with action tracking' : revealDescription}.\n${isNew ? `- contracts/${project.mechanic === 'lootbox' ? 'D20LootCollection' : 'D20RevealCollection'}.sol: actual OpenZeppelin standard NFT collection, fixed configuration and one-time controller wiring.\n` : '- Existing-target adapters do not implement or replace the external collection.\n'}` : ''}
 ## Implemented reference behavior
 
-${kind === 'starter' ? `Authenticated D20VRFConsumer callbacks, unknown/duplicate guards, a small stored result, in-transaction quoteFee, request ID correlation, and coordinator-authenticated refund notification. All msg.value goes to the coordinator for RNG service; any excess is credited there to the caller. The caller is always the protocol refund recipient in this reference. The consumer holds no application price.\n\n${isNew ? 'Collection supply, constructor premint when enabled, ERC-2981 royalty configuration, NFT metadata getters and fixed-outcome application delivery are implemented in the new-project collection pair. The callback itself does not mint or install the whole reveal array. See the precise wiring and delivery instructions below.' : project.mechanic === 'lootbox' ? 'open(actionId) binds a sender-scoped action to the fixed weights and configuration digest. rewardIndex reads one independent weighted outcome; it does not grant an item. Only a settled refund notification enables retrying an expired action.' : 'Only the explicit constructor operator can request the single reveal group. assignment reads a permutation of abstract indices; it does not mutate tokenURI or mint NFTs. Only a settled refund notification enables another attempt; an accepted reveal cannot be rerolled.'}` : 'No Solidity file is generated while errors remain. The configuration and selected integration decisions are preserved for correction.'}
+${kind === 'starter' ? `Authenticated D20VRFConsumer callbacks, unknown/duplicate guards, a small stored result, in-transaction quoteFee, request ID correlation, and coordinator-authenticated refund notification. All msg.value goes to the coordinator for RNG service; any excess is credited there to the caller. The caller is always the protocol refund recipient in this reference. The consumer holds no application price.\n\n${isNew ? 'Optional supply caps, configured premint allocation, ERC-2981 royalty configuration, NFT metadata getters and fixed-outcome application delivery are implemented in the new-project collection pair. The callback itself does not mint or install the whole reveal array. See the precise wiring and delivery instructions below.' : project.mechanic === 'lootbox' ? 'open(actionId) binds a sender-scoped action to the fixed weights and configuration digest. rewardIndex reads one independent weighted outcome; it does not grant an item. Only a settled refund notification enables retrying an expired action.' : `Only the explicit constructor operator can request a batch with requestReveal(batchKey, population). ${existingRevealBehavior} The adapter does not mutate tokenURI or mint NFTs. The host must freeze canonical non-overlapping token and metadata lists. Only a settled refund permits retrying that same batch with its original population; accepted batches cannot be rerolled.`}` : 'No Solidity file is generated while errors remain. The configuration and selected integration decisions are preserved for correction.'}
 
 ## Integration points
 
@@ -347,7 +395,7 @@ ${lifecycle()}
 
 ## Build and verification
 
-Dependencies are pinned to @d20dao/vrf-sdk ${SDK_VERSION}, ${isNew ? `@openzeppelin/contracts ${OPENZEPPELIN_VERSION}, ` : ''}and solc ${SOLC_VERSION}. Configure your project's Solidity build for exactly ${SOLC_VERSION} with optimizer enabled, 200 runs, evmVersion cancun, and resolve package imports from node_modules. This export does not include a deployment script or generated tests. No commands are claimed to deploy this bundle automatically. Integrate with the repository's reviewed build/test setup and report actual checks separately.
+Dependencies are pinned to @d20dao/vrf-sdk ${SDK_VERSION}, ${usesOpenZeppelin ? `@openzeppelin/contracts ${OPENZEPPELIN_VERSION}, ` : ''}and solc ${SOLC_VERSION}. Configure your project's Solidity build for exactly ${SOLC_VERSION} with optimizer enabled, 200 runs, evmVersion cancun, and resolve package imports from node_modules. This export does not include a deployment script or generated tests. No commands are claimed to deploy this bundle automatically. Integrate with the repository's reviewed build/test setup and report actual checks separately.
 
 Review unauthorized actions, action-ID reuse, out-of-order/duplicate callbacks, stale refund notifications, under/overpayment, accepted-word retry, supply/reveal commitments, and asset-delivery failure before using the integrated application.
 ` },
@@ -360,9 +408,11 @@ Review unauthorized actions, action-ID reuse, out-of-order/duplicate callbacks, 
   }
   const implementedFeatures = kind === 'plan' ? [] : [
     'authenticated VRF callbacks', 'request identity and same-result retry', 'fixed caller protocol refund recipient',
-    ...(isNew ? [project.mechanic === 'lootbox' ? 'ERC-1155 weighted reward collection' : 'ERC-721 bounded reveal collection', 'one-time owner-controlled consumer wiring', 'supply enforcement', 'fixed NFT metadata rules', project.mechanic === 'lootbox' ? 'reserved NFT delivery with requester-authorized recipient recovery' : 'explicit operator and permissionless reveal finalization', ...(project.modules.premint.enabled ? ['configured constructor premint'] : []), ...(project.modules.royalty.enabled ? ['configured fixed ERC-2981 royalties'] : [])] : ['existing-contract consumer adapter; external hooks unimplemented']),
+    ...(project.mechanic === 'reveal' ? [`reveal mode: ${project.reveal.mode}`, ...(project.reveal.mode === 'token-hash' ? ['per-token VRF seed hook; random traits not implemented'] : [])] : []),
+    ...(isNew ? [project.mechanic === 'lootbox' ? 'ERC-1155 weighted reward collection' : 'ERC-721 collection with batched reveal', 'one-time owner-controlled consumer wiring', project.collection.maxSupply === null ? 'unlimited collection supply' : 'configured supply cap enforcement', 'fixed NFT metadata rules', project.mechanic === 'lootbox' ? 'reserved NFT delivery with requester-authorized recipient recovery' : 'explicit operator and permissionless reveal finalization', ...(project.modules.premint.enabled ? [project.mechanic === 'lootbox' ? 'configured constructor premint' : 'configured staged premint allocation'] : []), ...(project.modules.royalty.enabled ? ['configured fixed ERC-2981 royalties'] : [])] : ['existing-contract consumer adapter; external hooks unimplemented']),
   ];
   const integrationRequired = [
+    ...(project.mechanic === 'reveal' && project.reveal.mode === 'token-hash' ? ['seed-driven traits and deterministic metadata rendering/publication; validate host token membership'] : []),
     ...(isNew ? ['deploy correct collection/consumer pair and wire controller once', 'final hosted metadata and content availability', 'client/operator application-delivery transactions'] : ['existing collection/game interfaces, supply and asset-delivery hooks', ...(project.modules.royalty.enabled ? ['selected royalty adapter'] : []), ...(project.modules.premint.enabled ? ['selected premint adapter'] : [])]),
     'canonical application entitlement authorization when needed',
     ...(Number(project.payment.price) > 0 ? ['selected application-price collection and escrow/refund accounting'] : []),
@@ -376,7 +426,7 @@ Review unauthorized actions, action-ID reuse, out-of-order/duplicate callbacks, 
     content: json({
       schemaVersion: 1, kind, projectId: project.id,
       configuration: { digest: fingerprint, algorithm: 'SHA-256', canonicalization: 'object {generatorVersion, project}; recursively sorted keys; array order preserved; compact JSON; project.createdAt and project.updatedAt excluded', generatorVersion: TEMPLATE_VERSION },
-      versions: { generator: TEMPLATE_VERSION, template: `${project.integration}/${project.mechanic}/${TEMPLATE_VERSION}`, sdk: SDK_VERSION, ...(isNew ? { openzeppelin: OPENZEPPELIN_VERSION } : {}), solc: SOLC_VERSION, evmVersion: 'cancun', optimizer: { enabled: true, runs: 200 } },
+      versions: { generator: TEMPLATE_VERSION, template: `${project.integration}/${project.mechanic}/${TEMPLATE_VERSION}`, sdk: SDK_VERSION, ...(usesOpenZeppelin ? { openzeppelin: OPENZEPPELIN_VERSION } : {}), solc: SOLC_VERSION, evmVersion: 'cancun', optimizer: { enabled: true, runs: 200 } },
       files: [...files.map((file) => file.path), 'GENERATION-MANIFEST.json'],
       validation: issues,
       checks: { configurationValidation: 'ran', solidityCompilation: 'not-run-by-generator', behavioralTests: 'not-run', deployment: 'not-run' },

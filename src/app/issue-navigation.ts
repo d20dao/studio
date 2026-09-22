@@ -53,8 +53,11 @@ export function issueTarget(path: string, project: StudioProject): IssueTarget {
     'collection.name': target('mechanic', 'collection.name', 'Collection name'),
     'collection.symbol': target('mechanic', 'collection.symbol', 'Symbol'),
     'collection.standard': target('overview', 'collection.standard', 'Asset standard'),
-    'collection.maxSupply': target('mechanic', 'collection.maxSupply', project.mechanic === 'reveal' ? 'Maximum supply / token count' : 'Maximum collection supply'),
+    'collection.supply': target('mechanic', 'collection.supply', 'Collection supply'),
+    'collection.maxSupply': target('mechanic', project.collection.maxSupply === null ? 'collection.supply' : 'collection.maxSupply', 'Maximum supply'),
     'collection.metadataBaseUri': project.mechanic === 'reveal' ? target('mechanic', 'collection.metadataBaseUri', 'Metadata base URI') : mechanicChoice(),
+    reveal: project.mechanic === 'reveal' ? target('mechanic', 'reveal.mode', 'Reveal mode') : mechanicChoice(),
+    'reveal.mode': project.mechanic === 'reveal' ? target('mechanic', 'reveal.mode', 'Reveal mode') : mechanicChoice(),
     'payment.price': target('payment', 'payment.price', 'Application price'),
     'payment.rngPayer': target('payment', 'payment.rngPayer', 'RNG fee payer'),
     'payment.refundRecipient': target('payment', 'payment.refundRecipient', 'Fixed refund recipient policy'),
@@ -97,7 +100,7 @@ export function issueTarget(path: string, project: StudioProject): IssueTarget {
 
 /** Draft field identities follow item IDs across reorder, never stale row indices. */
 export function draftIssueTarget(fieldKey: string, project: StudioProject): IssueTarget | undefined {
-  if (fieldKey === 'max-supply') return issueTarget('collection.maxSupply', project);
+  if (fieldKey === 'max-supply') return project.collection.maxSupply === null ? undefined : issueTarget('collection.maxSupply', project);
   if (fieldKey === 'premint') return project.modules.premint.enabled ? issueTarget('modules.premint.quantity', project) : undefined;
   if (fieldKey === 'royalty') return project.modules.royalty.enabled ? issueTarget('modules.royalty.bps', project) : undefined;
   if (project.mechanic !== 'lootbox') return undefined;

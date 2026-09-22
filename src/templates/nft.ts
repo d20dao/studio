@@ -64,7 +64,8 @@ ${ownableImports}
 /// @notice Fixed weighted reward item definitions; no public sale or arbitrary owner mint.
 contract D20LootCollection is ERC1155, ERC2981, Ownable, ReentrancyGuard {
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
-    uint256 public constant MAX_SUPPLY = ${project.collection.maxSupply};
+    bool public constant SUPPLY_CAPPED = ${project.collection.maxSupply !== null};
+    uint256 public constant MAX_SUPPLY = ${project.collection.maxSupply ?? 0};
     uint256 public constant PREMINT_QUANTITY = ${premint};
     string public name;
     string public symbol;
@@ -95,7 +96,7 @@ ${premint > 0 ? `        mintedSupply = PREMINT_QUANTITY;
 
     function reserve(bytes32 actionKey, address recipient) external onlyController {
         if (recipient == address(0) || reservedRecipient[actionKey] != address(0) || completed[actionKey]) revert InvalidReservation();
-        if (mintedSupply + reservedSupply >= MAX_SUPPLY) revert SupplyUnavailable();
+        if (SUPPLY_CAPPED && mintedSupply + reservedSupply >= MAX_SUPPLY) revert SupplyUnavailable();
         reservedRecipient[actionKey] = recipient;
         ++reservedSupply;
     }
@@ -267,81 +268,173 @@ contract D20LootStarter is D20VRFConsumer {
 function revealCollection(project: StudioProject, fingerprint: string): string {
   const premint = project.modules.premint.enabled ? project.modules.premint.quantity : 0;
   const offset = project.modules.premint.enabled && !project.modules.premint.includeInReveal ? premint : 0;
+  const mode = project.reveal.mode;
+  const shuffle = mode === 'shuffle';
+  const countType = shuffle ? 'uint32' : 'uint256';
+  const completed = `        nextRevealToken = start + count;
+        pendingRevealStart = 0;
+        pendingRevealCount = 0;
+        emit CollectionBatchRevealed(start, count);`;
+  const checkRange = '        if (count == 0 || start != pendingRevealStart || count != pendingRevealCount) revert InvalidAssignment();';
+  const batchLookup = `    function _batchFor(uint256 tokenId) private view returns (FinalizedBatch storage batch) {
+        uint256 low;
+        uint256 high = finalizedBatches.length;
+        while (low < high) {
+            uint256 middle = low + (high - low) / 2;
+            if (tokenId < finalizedBatches[middle].end) high = middle;
+            else low = middle + 1;
+        }
+        if (low == finalizedBatches.length || tokenId < finalizedBatches[low].start) revert NotRevealed();
+        return finalizedBatches[low];
+    }
+`;
+  const assignmentCode = shuffle
+    ? `    function revealBatch(uint256 start, uint32 count, uint256[] calldata assignment) external onlyController nonReentrant {
+${checkRange}
+        if (assignment.length != count) revert InvalidAssignment();
+        bool[] memory seen = new bool[](count);
+        for (uint256 i; i < count; ++i) {
+            uint256 index = assignment[i];
+            if (index >= count || seen[index]) revert InvalidAssignment();
+            seen[index] = true;
+            _metadataIndex[start + i] = start + index;
+        }
+${completed}
+    }
+
+    function metadataIndex(uint256 tokenId) public view returns (uint256) {
+        _requireOwned(tokenId);
+        if (tokenId < REVEAL_OFFSET) return tokenId;
+        if (tokenId >= nextRevealToken) revert NotRevealed();
+        return _metadataIndex[tokenId];
+    }
+`
+    : mode === 'offset'
+      ? `    function revealBatch(uint256 start, uint256 count, uint256 offset) external onlyController nonReentrant {
+${checkRange}
+        if (offset >= count) revert InvalidAssignment();
+        finalizedBatches.push(FinalizedBatch(start, start + count, offset));
+${completed}
+    }
+
+    function metadataIndex(uint256 tokenId) public view returns (uint256) {
+        _requireOwned(tokenId);
+        if (tokenId < REVEAL_OFFSET) return tokenId;
+        if (tokenId >= nextRevealToken) revert NotRevealed();
+        FinalizedBatch storage batch = _batchFor(tokenId);
+        return batch.start + addmod(tokenId - batch.start, batch.offset, batch.end - batch.start);
+    }
+
+${batchLookup}`
+      : `    function revealBatch(uint256 start, uint256 count, bytes32 word) external onlyController nonReentrant {
+${checkRange}
+        finalizedBatches.push(FinalizedBatch(start, start + count, word));
+${completed}
+    }
+
+    /// @notice Public deterministic trait seed, not a unique metadata permutation or hidden randomness.
+    function tokenHash(uint256 tokenId) public view returns (bytes32) {
+        _requireOwned(tokenId);
+        if (tokenId < REVEAL_OFFSET) revert NotParticipating();
+        if (tokenId >= nextRevealToken) revert NotRevealed();
+        FinalizedBatch storage batch = _batchFor(tokenId);
+        return keccak256(abi.encode(TOKEN_HASH_DOMAIN, block.chainid, address(this), CONFIG_DIGEST, batch.word, tokenId));
+    }
+
+${batchLookup}`;
   return `${header}
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 ${ownableImports}
-/// @notice Owner-distributed fixed-supply ERC721, with one bounded reveal and immutable URI rules.
+/// @notice Owner-distributed ERC721 with optional supply cap and frozen ${mode} reveal batches.
 contract D20RevealCollection is ERC721, ERC2981, Ownable, ReentrancyGuard {
     using Strings for uint256;
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
-    uint256 public constant MAX_SUPPLY = ${project.collection.maxSupply};
+    bool public constant SUPPLY_CAPPED = ${project.collection.maxSupply !== null};
+    uint256 public constant MAX_SUPPLY = ${project.collection.maxSupply ?? 0};
     uint256 public constant PREMINT_QUANTITY = ${premint};
+    address public constant PREMINT_RECIPIENT = address(uint160(${premint > 0 ? BigInt(project.modules.premint.recipient) : 0n}));
     uint256 public constant REVEAL_OFFSET = ${offset};
-    uint32 public constant POPULATION = ${project.collection.maxSupply - offset};
+${shuffle ? '    uint32 public constant MAX_REVEAL_BATCH = 256;' : ''}
+${mode === 'token-hash' ? '    bytes32 public constant TOKEN_HASH_DOMAIN = keccak256("D20DAO_STUDIO_TOKEN_HASH_V1");' : ''}
     uint256 public mintedSupply;
+    uint256 public premintMinted;
     bool public mintClosed;
-    bool public revealLocked;
-    bool public revealed;
+    uint256 public nextRevealToken = REVEAL_OFFSET;
+    uint256 public pendingRevealStart;
+    ${countType} public pendingRevealCount;
     string public metadataBaseUri;
-    mapping(uint256 => uint256) public metadataIndex;
+${shuffle ? '    mapping(uint256 => uint256) private _metadataIndex;' : `    struct FinalizedBatch { uint256 start; uint256 end; ${mode === 'offset' ? 'uint256 offset' : 'bytes32 word'}; }
+    FinalizedBatch[] public finalizedBatches;`}
+    error NotRevealed();
+${mode === 'token-hash' ? '    error NotParticipating();' : ''}
     error InvalidMint();
-    error MintNotClosed();
-    error AlreadyRevealed();
+    error PremintIncomplete();
+    error NothingToReveal();
     error InvalidAssignment();
-    event MintClosed();
-    event CollectionRevealed();
+    event MintClosed(uint256 mintedSupply);
+    event RevealBatchLocked(uint256 indexed start, ${countType} count);
+    event CollectionBatchRevealed(uint256 indexed start, ${countType} count);
 ${controller()}
     constructor(address initialOwner) ERC721(${solidityString(project.collection.name)}, ${solidityString(project.collection.symbol)}) Ownable(initialOwner) {
         metadataBaseUri = ${solidityString(project.collection.metadataBaseUri)};
 ${royaltySetup(project)}
-${premint > 0 ? `        for (uint256 id; id < PREMINT_QUANTITY; ++id) {
-            ++mintedSupply;
-            _safeMint(address(uint160(${BigInt(project.modules.premint.recipient)})), id);
-        }` : ''}
     }
 
-    /// @notice Distribution hook, not a public paid mint. Owner sends tokens to recipients in bounded batches.
+    /// @notice Stage the fixed premint allocation in caller-sized transactions; no constructor mint loop.
+    function mintPremint(uint256 quantity) external onlyOwner nonReentrant {
+        if (mintClosed || quantity == 0 || quantity > PREMINT_QUANTITY - premintMinted) revert InvalidMint();
+        _checkSupply(quantity);
+        premintMinted += quantity;
+        _mintSequential(PREMINT_RECIPIENT, quantity);
+    }
+
+    /// @notice Distribution hook, not a paid sale. Quantity is limited by supply and transaction gas, not a product batch cap.
     function mint(address recipient, uint256 quantity) external onlyOwner nonReentrant {
-        if (mintClosed || quantity == 0 || quantity > 64 || mintedSupply + quantity > MAX_SUPPLY) revert InvalidMint();
+        if (premintMinted != PREMINT_QUANTITY) revert PremintIncomplete();
+        if (mintClosed || recipient == address(0) || quantity == 0) revert InvalidMint();
+        _checkSupply(quantity);
+        _mintSequential(recipient, quantity);
+    }
+
+    function _checkSupply(uint256 quantity) private view {
+        if (SUPPLY_CAPPED && quantity > MAX_SUPPLY - mintedSupply) revert InvalidMint();
+    }
+
+    function _mintSequential(address recipient, uint256 quantity) private {
         for (uint256 i; i < quantity; ++i) {
             uint256 id = mintedSupply++;
             _safeMint(recipient, id);
         }
     }
 
-    function closeMint() external onlyOwner {
-        if (mintClosed || mintedSupply != MAX_SUPPLY) revert InvalidMint();
+    function closeMint() external onlyOwner nonReentrant {
+        if (premintMinted != PREMINT_QUANTITY) revert PremintIncomplete();
+        if (mintClosed) revert InvalidMint();
         mintClosed = true;
-        emit MintClosed();
+        emit MintClosed(mintedSupply);
     }
 
-    function lockReveal() external onlyController {
-        if (!mintClosed) revert MintNotClosed();
-        if (revealed) revert AlreadyRevealed();
-        revealLocked = true;
+    /// @notice Freeze the next already-minted range. A refunded request retries this exact range even if more tokens mint.
+    function lockRevealBatch() external onlyController nonReentrant returns (uint256 start, ${countType} count) {
+        if (premintMinted != PREMINT_QUANTITY) revert PremintIncomplete();
+        if (pendingRevealCount != 0) return (pendingRevealStart, pendingRevealCount);
+        uint256 available = mintedSupply - nextRevealToken;
+        if (available == 0) revert NothingToReveal();
+        start = nextRevealToken;
+        count = ${shuffle ? 'uint32(available > MAX_REVEAL_BATCH ? MAX_REVEAL_BATCH : available)' : 'available'};
+        pendingRevealStart = start;
+        pendingRevealCount = count;
+        emit RevealBatchLocked(start, count);
     }
 
-    function reveal(uint256[] calldata assignment) external onlyController {
-        if (!revealLocked) revert MintNotClosed();
-        if (revealed) revert AlreadyRevealed();
-        if (assignment.length != POPULATION) revert InvalidAssignment();
-        bool[] memory seen = new bool[](POPULATION);
-        for (uint256 i; i < POPULATION; ++i) {
-            uint256 index = assignment[i];
-            if (index >= POPULATION || seen[index]) revert InvalidAssignment();
-            seen[index] = true;
-            metadataIndex[REVEAL_OFFSET + i] = REVEAL_OFFSET + index;
-        }
-        revealed = true;
-        emit CollectionRevealed();
-    }
+${assignmentCode}
 
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         _requireOwned(tokenId);
         if (tokenId < REVEAL_OFFSET) return string.concat(metadataBaseUri, tokenId.toString(), ".json");
-        if (!revealed) return "";
-        return string.concat(metadataBaseUri, metadataIndex[tokenId].toString(), ".json");
+        if (tokenId >= nextRevealToken) return "";
+        return string.concat(metadataBaseUri, ${mode === 'token-hash' ? 'tokenId' : 'metadataIndex(tokenId)'}.toString(), ".json");
     }
 
     function supportsInterface(bytes4 interfaceId) public view override(ERC721, ERC2981) returns (bool) {
@@ -352,25 +445,51 @@ ${premint > 0 ? `        for (uint256 id; id < PREMINT_QUANTITY; ++id) {
 }
 
 function revealConsumer(project: StudioProject, fingerprint: string): string {
-  const offset = project.modules.premint.enabled && !project.modules.premint.includeInReveal ? project.modules.premint.quantity : 0;
+  const mode = project.reveal.mode;
+  const shuffle = mode === 'shuffle';
+  const countType = shuffle ? 'uint32' : 'uint256';
+  const resultArgument = shuffle ? 'uint256[] calldata assignment' : mode === 'offset' ? 'uint256 offset' : 'bytes32 word';
+  const requestCode = mode === 'token-hash'
+    ? `        id = ID20VRF(vrfCoordinator).requestRandomness{value: msg.value}(
+            keccak256(abi.encode(CONFIG_DIGEST, start, count)), CALLBACK_GAS, msg.sender
+        );`
+    : `        RandomnessMapping.Spec memory spec = ${shuffle
+      ? 'RandomnessMapping.Spec(RandomnessMapping.Operation.Shuffle, 0, 0, count, count)'
+      : 'RandomnessMapping.Spec(RandomnessMapping.Operation.NumberRange, 0, count - 1, 1, 0)'};
+        id = ID20VRF(vrfCoordinator).requestMappedRandomness{value: msg.value}(
+            keccak256(abi.encode(CONFIG_DIGEST, start, count)), CALLBACK_GAS, msg.sender, spec
+        );`;
+  const resultCode = shuffle
+    ? `    function assignment(uint256 id) public view returns (uint256[] memory) {
+        if (!reveals[id].ready || reveals[id].refunded) revert NotReady();
+        return ID20VRF(vrfCoordinator).getMappedResult(id);
+    }`
+    : mode === 'offset'
+      ? `    function offset(uint256 id) public view returns (uint256) {
+        if (!reveals[id].ready || reveals[id].refunded) revert NotReady();
+        return ID20VRF(vrfCoordinator).getMappedResult(id)[0];
+    }`
+      : `    function resultWord(uint256 id) public view returns (bytes32) {
+        if (!reveals[id].ready || reveals[id].refunded) revert NotReady();
+        return reveals[id].word;
+    }`;
   return `${header}
-${consumerImports}
+${mode === 'token-hash' ? consumerImports.replace('import {RandomnessMapping} from "@d20dao/vrf-sdk/contracts/libraries/RandomnessMapping.sol";\n', '') : consumerImports}
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 interface ID20RevealCollection {
     function CONFIG_DIGEST() external view returns (bytes32);
-    function lockReveal() external;
-    function reveal(uint256[] calldata assignment) external;
+    function lockRevealBatch() external returns (uint256 start, ${countType} count);
+    function revealBatch(uint256 start, ${countType} count, ${resultArgument}) external;
 }
 
-contract D20RevealStarter is D20VRFConsumer {
+contract D20RevealStarter is D20VRFConsumer, ReentrancyGuard {
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
     uint32 public constant CALLBACK_GAS = 100_000;
-    uint32 public constant POPULATION = ${project.collection.maxSupply - offset};
     address public immutable operator;
     ID20RevealCollection public immutable collection;
-    uint256 public requestId;
-    bytes32 public word;
-    bool public ready;
-    bool public finalized;
+    struct RevealRequest { uint256 start; ${countType} count; bytes32 word; bool ready; bool refunded; bool finalized; }
+    mapping(uint256 => RevealRequest) public reveals;
+    uint256 public currentRequestId;
     error InvalidOperator();
     error InvalidCollection();
     error OnlyOperator();
@@ -379,10 +498,10 @@ contract D20RevealStarter is D20VRFConsumer {
     error UnexpectedCallback();
     error NotReady();
     error AlreadyFinalized();
-    event RevealRequested(uint256 indexed requestId);
+    event RevealRequested(uint256 indexed requestId, uint256 indexed start, ${countType} count);
     event RevealReady(uint256 indexed requestId, bytes32 word);
-    event RevealAttemptRefunded(uint256 indexed requestId);
-    event RevealFinalized(uint256 indexed requestId);
+    event RevealAttemptRefunded(uint256 indexed requestId, uint256 indexed start, ${countType} count);
+    event RevealFinalized(uint256 indexed requestId, uint256 indexed start, ${countType} count);
 
     constructor(address coordinator, address collection_, address operator_) D20VRFConsumer(coordinator) {
         if (operator_ == address(0)) revert InvalidOperator();
@@ -392,43 +511,48 @@ contract D20RevealStarter is D20VRFConsumer {
         collection = ID20RevealCollection(collection_);
     }
 
-    function requestReveal() external payable returns (uint256 id) {
+    function requestReveal() external payable nonReentrant returns (uint256 id) {
         if (msg.sender != operator) revert OnlyOperator();
-        if (requestId != 0 || ready) revert AlreadyRequested();
+        if (currentRequestId != 0) revert AlreadyRequested();
         uint256 fee = ID20VRF(vrfCoordinator).quoteFee(CALLBACK_GAS);
         if (msg.value < fee) revert Underpaid(fee, msg.value);
-        collection.lockReveal();
-        RandomnessMapping.Spec memory spec = RandomnessMapping.Spec(RandomnessMapping.Operation.Shuffle, 0, 0, POPULATION, POPULATION);
-        id = ID20VRF(vrfCoordinator).requestMappedRandomness{value: msg.value}(CONFIG_DIGEST, CALLBACK_GAS, msg.sender, spec);
-        requestId = id;
-        emit RevealRequested(id);
+        (uint256 start, ${countType} count) = collection.lockRevealBatch();
+${requestCode}
+        reveals[id] = RevealRequest(start, count, bytes32(0), false, false, false);
+        currentRequestId = id;
+        emit RevealRequested(id, start, count);
     }
 
     function _fulfillRandomness(uint256 id, bytes32 randomness) internal override {
-        if (id == 0 || id != requestId || ready) revert UnexpectedCallback();
-        word = randomness;
-        ready = true;
+        RevealRequest storage reveal = reveals[id];
+        if (id == 0 || id != currentRequestId || reveal.count == 0 || reveal.ready || reveal.refunded || reveal.finalized) revert UnexpectedCallback();
+        reveal.word = randomness;
+        reveal.ready = true;
         emit RevealReady(id, randomness);
     }
 
     function _onRefund(uint256 id) internal override {
-        if (id == 0 || id != requestId || ready) revert UnexpectedCallback();
-        requestId = 0;
-        emit RevealAttemptRefunded(id);
+        RevealRequest storage reveal = reveals[id];
+        if (id == 0 || reveal.count == 0 || reveal.ready || reveal.finalized) revert UnexpectedCallback();
+        if (reveal.refunded) return;
+        if (id != currentRequestId) revert UnexpectedCallback();
+        reveal.refunded = true;
+        currentRequestId = 0;
+        emit RevealAttemptRefunded(id, reveal.start, reveal.count);
     }
 
-    function assignment() public view returns (uint256[] memory) {
-        if (!ready) revert NotReady();
-        return ID20VRF(vrfCoordinator).getMappedResult(requestId);
-    }
+${resultCode}
 
-    /// @notice Permissionless application delivery; applies exactly the accepted permutation once.
-    function finalizeReveal() external {
-        if (!ready) revert NotReady();
-        if (finalized) revert AlreadyFinalized();
-        finalized = true;
-        collection.reveal(assignment());
-        emit RevealFinalized(requestId);
+    /// @notice Permissionless application delivery; applies exactly the accepted batch result once.
+    function finalizeReveal(uint256 id) external nonReentrant {
+        RevealRequest storage reveal = reveals[id];
+        if (!reveal.ready || reveal.refunded) revert NotReady();
+        if (reveal.finalized) revert AlreadyFinalized();
+        if (id != currentRequestId) revert NotReady();
+        reveal.finalized = true;
+        collection.revealBatch(reveal.start, reveal.count, ${shuffle ? 'assignment(id)' : mode === 'offset' ? 'offset(id)' : 'reveal.word'});
+        currentRequestId = 0;
+        emit RevealFinalized(id, reveal.start, reveal.count);
     }
 }
 `;

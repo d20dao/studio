@@ -2,6 +2,7 @@ export type Mechanic = 'lootbox' | 'reveal';
 export type IntegrationTarget = 'new' | 'existing';
 export type Network = 'arc-testnet' | 'arc-mainnet';
 export type Responsibility = 'user' | 'developer' | 'both';
+export type RevealMode = 'shuffle' | 'offset' | 'token-hash';
 
 export interface LootItem {
   id: string;
@@ -13,7 +14,7 @@ export interface LootItem {
 }
 
 export interface StudioProject {
-  schemaVersion: 2;
+  schemaVersion: 3;
   id: string;
   name: string;
   mechanic: Mechanic;
@@ -26,10 +27,12 @@ export interface StudioProject {
     name: string;
     symbol: string;
     standard: 'erc721' | 'erc1155';
-    maxSupply: number;
+    /** Null means the collection has no configured supply cap. */
+    maxSupply: number | null;
     metadataBaseUri: string;
   };
   loot: { items: LootItem[] };
+  reveal: { mode: RevealMode };
   modules: {
     premint: { enabled: boolean; quantity: number; recipient: string; includeInReveal: boolean };
     royalty: { enabled: boolean; bps: number; recipient: string };

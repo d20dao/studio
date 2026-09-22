@@ -5,18 +5,19 @@ import { createProject, validateProject } from '../src/core/project';
 describe('validation issue navigation', () => {
   it('routes collection, payment and enabled module errors to their real controls', () => {
     const project = createProject('Collection', 'reveal');
+    project.collection.maxSupply = 1000;
     project.modules.premint.enabled = true;
     project.modules.royalty.enabled = true;
     project.payment.refundRecipient = 'custom';
     const cases = [
       ['name', 'overview'], ['collection.standard', 'overview'], ['network', 'overview'],
-      ['collection.name', 'mechanic'], ['collection.symbol', 'mechanic'], ['collection.maxSupply', 'mechanic'], ['collection.metadataBaseUri', 'mechanic'],
+      ['collection.name', 'mechanic'], ['collection.symbol', 'mechanic'], ['collection.maxSupply', 'mechanic'], ['collection.metadataBaseUri', 'mechanic'], ['reveal.mode', 'mechanic'],
       ['modules.premint.quantity', 'modules'], ['modules.premint.recipient', 'modules'], ['modules.premint.includeInReveal', 'modules'],
       ['modules.royalty.bps', 'modules'], ['modules.royalty.recipient', 'modules'],
       ['payment.price', 'payment'], ['payment.refundAddress', 'payment'],
     ];
     for (const [path, page] of cases) expect(issueTarget(path, project)).toMatchObject({ path, page });
-    expect(issueTarget('collection.maxSupply', project).label).toBe('Maximum supply / token count');
+    expect(issueTarget('collection.maxSupply', project).label).toBe('Maximum supply');
   });
 
   it('maps every row field to its current schema path and never invents a missing row', () => {
@@ -54,7 +55,7 @@ describe('validation issue navigation', () => {
     expect(issueTarget('payment.refundAddress', project).path).toBe('payment.refundRecipient');
     project.mechanic = 'lootbox';
     expect(issueTarget('collection.metadataBaseUri', project).path).toBe('mechanic');
-    expect(issueTarget('collection.maxSupply', project).label).toBe('Maximum collection supply');
+    expect(issueTarget('collection.maxSupply', project).label).toBe('Maximum supply');
   });
 
   it('routes the validator’s real zero-total aggregate issue to an editable weight', () => {
@@ -74,6 +75,26 @@ describe('validation issue navigation', () => {
     for (const path of ['project', 'future.unknown', '__proto__', 'constructor', 'loot.items.-1.weight']) {
       expect(issueTarget(path, project)).toEqual({ page: 'overview', path: 'name', label: 'Project name' });
     }
+  });
+  it('targets the reveal selector only when the reveal mechanic makes it reachable', () => {
+    const project = createProject('Reveal modes', 'reveal');
+    for (const mode of ['shuffle', 'offset', 'token-hash'] as const) {
+      project.reveal.mode = mode;
+      expect(issueTarget('reveal.mode', project)).toEqual({ page: 'mechanic', path: 'reveal.mode', label: 'Reveal mode' });
+    }
+    expect(issueTarget('reveal', project).path).toBe('reveal.mode');
+    project.mechanic = 'lootbox';
+    expect(issueTarget('reveal.mode', project)).toMatchObject({ page: 'overview', path: 'mechanic' });
+  });
+  it('routes an unlimited-supply issue to the policy and drops its stale numeric draft', () => {
+    const project = createProject('Supply policy', 'reveal');
+    project.collection.maxSupply = 0;
+    expect(issueTarget('collection.maxSupply', project).path).toBe('collection.maxSupply');
+    expect(draftIssueTarget('max-supply', project)?.path).toBe('collection.maxSupply');
+    project.collection.maxSupply = null;
+    expect(issueTarget('collection.maxSupply', project).path).toBe('collection.supply');
+    expect(issueTarget('collection.supply', project).path).toBe('collection.supply');
+    expect(draftIssueTarget('max-supply', project)).toBeUndefined();
   });
 
   it('resolves all emitted validation issues from a broken business draft', () => {
@@ -117,6 +138,8 @@ describe('incomplete draft navigation', () => {
 
   it('maps active numeric settings and ignores drafts from hidden or disabled inputs', () => {
     const project = createProject('Loot', 'lootbox');
+    expect(draftIssueTarget('max-supply', project)).toBeUndefined();
+    project.collection.maxSupply = 1000;
     expect(draftIssueTarget('max-supply', project)?.path).toBe('collection.maxSupply');
     expect(draftIssueTarget('premint', project)).toBeUndefined();
     expect(draftIssueTarget('royalty', project)).toBeUndefined();
