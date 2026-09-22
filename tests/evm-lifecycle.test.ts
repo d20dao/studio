@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { createHardhatRuntimeEnvironment } from 'hardhat/hre';
 import type { NetworkConnection } from 'hardhat/types/network';
-import { BrowserProvider, Contract, ContractFactory, id, zeroPadValue, type InterfaceAbi, type JsonRpcSigner, type ContractTransactionResponse } from 'ethers';
+import { BrowserProvider, Contract, ContractFactory, id, zeroPadValue, ZeroAddress, type InterfaceAbi, type JsonRpcSigner, type ContractTransactionResponse } from 'ethers';
 import { createProject } from '../src/core/project';
 import { generateProject } from '../src/core/generate';
 import type { StudioProject } from '../src/core/types';
@@ -59,7 +59,6 @@ describe('generated NFT templates on a local in-process EVM', () => {
     project.createdAt = project.updatedAt = '2026-09-22T00:00:00Z';
     project.collection.maxSupply = 4;
     project.collection.metadataBaseUri = 'ipfs://fixed-metadata/';
-    project.loot.maxOpenings = 10;
     project.loot.items = [
       { id: 'common', tokenId: '42', name: '雪 "item"', metadataUri: 'ipfs://common-42', weight: 60 },
       { id: 'rare', name: 'Rare', metadataUri: 'ipfs://rare-1', weight: 40 },
@@ -149,6 +148,82 @@ describe('generated NFT templates on a local in-process EVM', () => {
     await expect(coordinator.retryCallback(1, 100_000)).rejects.toThrow();
   }, 30_000);
 
+  it('recovers a permanently rejected NFT only at the requester\'s instruction with the same accepted token and reservation', async () => {
+    const project = input('lootbox'); project.collection.maxSupply = 1;
+    const { artifacts, coordinator, collection, consumer } = await setup(project);
+    const requester = await deploy(artifacts, 'PermanentRejectingRequester');
+    const requesterAddress = await requester.getAddress();
+    await tx(requester.open(await consumer.getAddress(), id('permanent-receiver'), { value: 1000 }));
+    await expect(requester.redirect(await consumer.getAddress(), 1, player.address)).rejects.toThrow();
+    await expect((collection.connect(player) as Contract).updateRecipient(id('anything'), player.address)).rejects.toThrow();
+    await tx(coordinator.fulfill(1, word, 0, { gasLimit: 2_000_000 }));
+    const before = await consumer.openings(1);
+    const tokenId = await consumer.rewardTokenId(1);
+    expect(before.requester).toBe(requesterAddress);
+    expect(before.deliveryRecipient).toBe(requesterAddress);
+    await expect(consumer.deliver(1)).rejects.toThrow();
+    await expect((consumer.connect(other) as Contract).setDeliveryRecipient(1, other.address)).rejects.toThrow();
+    await expect((requester.connect(other) as Contract).redirect(await consumer.getAddress(), 1, other.address)).rejects.toThrow();
+    await expect(requester.redirect(await consumer.getAddress(), 1, ZeroAddress)).rejects.toThrow();
+    await expect(coordinator.refundRequest(1)).rejects.toThrow();
+    const redirected = await tx(requester.redirect(await consumer.getAddress(), 1, player.address));
+    const changed = redirected!.logs.map(log => { try { return consumer.interface.parseLog(log); } catch { return null; } }).find(event => event?.name === 'DeliveryRecipientChanged');
+    expect(changed?.args.previousRecipient).toBe(requesterAddress);
+    expect(changed?.args.recipient).toBe(player.address);
+    const after = await consumer.openings(1);
+    expect(after.actionKey).toBe(before.actionKey);
+    expect(after.word).toBe(before.word);
+    expect(after.requester).toBe(requesterAddress);
+    expect(after.deliveryRecipient).toBe(player.address);
+    expect(await consumer.rewardTokenId(1)).toBe(tokenId);
+    expect((await coordinator.requests(1)).recipient).toBe(requesterAddress);
+    expect(await collection.reservedRecipient(before.actionKey)).toBe(player.address);
+    expect(await collection.reservedSupply()).toBe(1n);
+    expect(await collection.mintedSupply()).toBe(0n);
+    const delivered = await tx((consumer.connect(other) as Contract).deliver(1));
+    const delivery = delivered!.logs.map(log => { try { return consumer.interface.parseLog(log); } catch { return null; } }).find(event => event?.name === 'RewardDelivered');
+    expect(delivery?.args.recipient).toBe(player.address);
+    expect(await collection.balanceOf(player.address, tokenId)).toBe(1n);
+    expect(await collection.balanceOf(requesterAddress, tokenId)).toBe(0n);
+    expect(await collection.reservedSupply()).toBe(0n);
+    expect(await collection.mintedSupply()).toBe(1n);
+    await expect(requester.redirect(await consumer.getAddress(), 1, other.address)).rejects.toThrow();
+    await expect(consumer.deliver(1)).rejects.toThrow();
+    await expect(requester.open(await consumer.getAddress(), id('permanent-receiver'), { value: 1000 })).rejects.toThrow();
+  }, 30_000);
+
+  it('lets a non-receiving requester choose an NFT beneficiary upfront while keeping refunds with the requester', async () => {
+    const { artifacts, coordinator, collection, consumer } = await setup(input('lootbox'));
+    const requester = await deploy(artifacts, 'PermanentRejectingRequester');
+    await expect(requester.openTo(await consumer.getAddress(), id('zero-recipient'), ZeroAddress, { value: 1000 })).rejects.toThrow();
+    expect(await collection.reservedSupply()).toBe(0n);
+    expect(await coordinator.nextId()).toBe(1n);
+    await tx(requester.openTo(await consumer.getAddress(), id('direct-beneficiary'), player.address, { value: 1100 }));
+    expect((await consumer.openings(1)).deliveryRecipient).toBe(player.address);
+    expect((await coordinator.requests(1)).recipient).toBe(await requester.getAddress());
+    expect(await coordinator.refundCredit(await requester.getAddress())).toBe(100n);
+    expect(await coordinator.refundCredit(player.address)).toBe(0n);
+    await tx(coordinator.fulfill(1, word, 0, { gasLimit: 2_000_000 }));
+    await tx(consumer.deliver(1));
+    expect(await collection.balanceOf(player.address, await consumer.rewardTokenId(1))).toBe(1n);
+  }, 30_000);
+
+  it('blocks recipient redirection and a second mint from inside an ERC1155 receiver hook', async () => {
+    const { artifacts, coordinator, collection, consumer } = await setup(input('lootbox'));
+    const receiver = await deploy(artifacts, 'ReentrantRewardReceiver');
+    await tx(receiver.open(await consumer.getAddress(), id('reentrant-receiver'), other.address, { value: 1000 }));
+    await tx(coordinator.fulfill(1, word, 0, { gasLimit: 2_000_000 }));
+    await tx(consumer.deliver(1));
+    expect(await receiver.redirectSucceeded()).toBe(false);
+    expect(await receiver.duplicateDeliverySucceeded()).toBe(false);
+    expect((await consumer.openings(1)).deliveryRecipient).toBe(await receiver.getAddress());
+    const tokenId = await consumer.rewardTokenId(1);
+    expect(await collection.balanceOf(await receiver.getAddress(), tokenId)).toBe(1n);
+    expect(await collection.balanceOf(other.address, tokenId)).toBe(0n);
+    expect(await collection.mintedSupply()).toBe(1n);
+    expect(await collection.reservedSupply()).toBe(0n);
+  }, 30_000);
+
   it('settles an expired refund before notification, releases capacity once and protects a later attempt', async () => {
     const { artifacts, coordinator, collection, consumer } = await setup(input('lootbox'));
     const receiver = await deploy(artifacts, 'RewardReceiver');
@@ -171,7 +246,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
     expect(await coordinator.lastCallbackGas()).toBeLessThan(100_000n);
     expect(await collection.reservedSupply()).toBe(0n);
     await tx(receiver.open(await consumer.getAddress(), id('expired'), { value: 1000 }));
-    expect(await consumer.admittedActions()).toBe(1n);
+    expect(await coordinator.nextId()).toBe(3n);
     expect(await collection.reservedSupply()).toBe(1n);
     await tx(coordinator.rawRefundForTest(await consumer.getAddress(), 1));
     expect(await collection.reservedSupply()).toBe(1n);
@@ -181,6 +256,57 @@ describe('generated NFT templates on a local in-process EVM', () => {
     await tx(coordinator.fulfill(2, word, 0, { gasLimit: 2_000_000 }));
     await tx(consumer.deliver(2));
     expect(await collection.mintedSupply()).toBe(1n);
+  }, 30_000);
+
+  it('admits fresh actions after refunded reservations exceed historical supply, while preserving premint and the mint cap', async () => {
+    const project = input('lootbox');
+    project.collection.maxSupply = 2;
+    project.modules.premint = { enabled: true, quantity: 1, recipient: owner.address, includeInReveal: true };
+    const { coordinator, collection, consumer } = await setup(project);
+    const playerConsumer = consumer.connect(player) as Contract;
+    expect(await collection.mintedSupply()).toBe(1n);
+    expect(await collection.balanceOf(owner.address, 42)).toBe(1n);
+
+    // Three distinct actions expire; none mints a reward or consumes permanent capacity.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await tx(playerConsumer.open(id(`fresh-expired-${attempt}`), { value: 1000 }));
+      expect(await collection.reservedSupply()).toBe(1n);
+      await expect(playerConsumer.open(id(`over-capacity-${attempt}`), { value: 1000 })).rejects.toThrow();
+      expect(await coordinator.nextId()).toBe(BigInt(attempt + 1));
+      await connection.provider.request({ method: 'evm_increaseTime', params: [61] });
+      await connection.provider.request({ method: 'evm_mine', params: [] });
+      await tx((coordinator.connect(other) as Contract).refundRequest(attempt, { gasLimit: 2_000_000 }));
+      expect((await consumer.openings(attempt)).refunded).toBe(true);
+      expect(await collection.reservedSupply()).toBe(0n);
+      expect(await collection.mintedSupply()).toBe(1n);
+    }
+    expect((await coordinator.nextId()) - 1n).toBeGreaterThan(BigInt(project.collection.maxSupply));
+    await tx(playerConsumer.open(id('fresh-success-after-refunds'), { value: 1000 }));
+    await tx(coordinator.fulfill(4, word, 0, { gasLimit: 2_000_000 }));
+    await tx(consumer.deliver(4));
+    expect(await collection.mintedSupply()).toBe(2n);
+    expect(await collection.reservedSupply()).toBe(0n);
+    expect(await collection.balanceOf(owner.address, 42)).toBe(1n);
+    expect(await collection.balanceOf(player.address, await consumer.rewardTokenId(4))).toBe(1n);
+    await expect(playerConsumer.open(id('after-mint-cap'), { value: 1000 })).rejects.toThrow();
+    expect(await coordinator.nextId()).toBe(5n);
+  }, 30_000);
+
+  it('leaves inventory enforcement to the existing-project host while retaining action and accepted-result binding', async () => {
+    const project = input('lootbox'); project.integration = 'existing'; project.collection.maxSupply = 1;
+    const artifacts = await compile(project);
+    const coordinator = await deploy(artifacts, 'LifecycleCoordinator');
+    const consumer = await deploy(artifacts, 'D20LootStarter', [await coordinator.getAddress()]);
+    const playerConsumer = consumer.connect(player) as Contract;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const action = id(`existing-host-action-${attempt}`);
+      await tx(playerConsumer.open(action, { value: 1000 }));
+      await tx(coordinator.fulfill(attempt, word, 0, { gasLimit: 2_000_000 }));
+      expect((await consumer.openings(attempt)).ready).toBe(true);
+      expect((await consumer.openings(attempt)).word).toBe(word);
+      await expect(playerConsumer.open(action, { value: 1000 })).rejects.toThrow();
+    }
+    expect(await coordinator.nextId()).toBe(4n);
   }, 30_000);
 
   it.each([true, false])('reveals the exact eligible ERC721 set with premint inclusion=%s', async (includeInReveal) => {

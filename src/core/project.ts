@@ -1,6 +1,6 @@
 import type { IntegrationTarget, Mechanic, StudioProject, ValidationIssue } from './types';
 
-export const PROJECT_SCHEMA_VERSION = 1;
+export const PROJECT_SCHEMA_VERSION = 2;
 export const MAX_PROJECT_BYTES = 512 * 1024;
 export const MAX_ITEMS = 256;
 export const MAX_URI_LENGTH = 512;
@@ -13,14 +13,14 @@ const zeroAddress = /^0x0{40}$/i;
 export function createProject(name: string, mechanic: Mechanic, integration: IntegrationTarget = 'new'): StudioProject {
   const now = new Date().toISOString();
   return {
-    schemaVersion: 1, id: crypto.randomUUID(), name, mechanic, integration,
+    schemaVersion: PROJECT_SCHEMA_VERSION, id: crypto.randomUUID(), name, mechanic, integration,
     network: 'arc-testnet', createdAt: now, updatedAt: now, isExample: false,
     collection: { name, symbol: mechanic === 'reveal' ? 'RELIC' : 'ITEM', standard: mechanic === 'reveal' ? 'erc721' : 'erc1155', maxSupply: 128, metadataBaseUri: '' },
     loot: { items: [
       { id: 'iron-shard', name: 'Iron shard', metadataUri: '', weight: 70 },
       { id: 'moonstone', name: 'Moonstone', metadataUri: '', weight: 25 },
       { id: 'ancient-relic', name: 'Ancient relic', metadataUri: '', weight: 5 },
-    ], maxOpenings: 1000 },
+    ] },
     modules: {
       premint: { enabled: false, quantity: 8, recipient: '', includeInReveal: true },
       royalty: { enabled: false, bps: 500, recipient: '' },
@@ -49,10 +49,12 @@ export function validateProject(project: StudioProject): ValidationIssue[] {
   if (project.mechanic === 'reveal') {
     if (project.collection.standard !== 'erc721') error('collection.standard', 'The reveal starter currently describes an ERC-721 collection.');
     if (project.collection.maxSupply > 256) error('collection.maxSupply', 'The built-in reveal profile supports up to 256 token IDs.');
-    if (!project.collection.metadataBaseUri.trim()) warning('collection.metadataBaseUri', 'Add the final metadata reference before integrating the reveal.');
+    if (!project.collection.metadataBaseUri.trim()) {
+      if (project.integration === 'new') error('collection.metadataBaseUri', 'Set the final metadata base URI before generating the collection; it has no URI setter.');
+      else warning('collection.metadataBaseUri', 'Add the final metadata reference before integrating the reveal.');
+    }
   } else {
     if (project.collection.standard !== 'erc1155') error('collection.standard', 'The loot starter currently describes ERC-1155 rewards.');
-    if (!whole(project.loot.maxOpenings, 1, 1_000_000)) error('loot.maxOpenings', 'Use a whole number between 1 and 1,000,000.');
     if (project.loot.items.length < 1 || project.loot.items.length > MAX_ITEMS) error('loot.items', 'Configure between 1 and 256 items.');
     const ids = new Set<string>();
     const tokenIds = new Set<string>();
@@ -68,6 +70,7 @@ export function validateProject(project: StudioProject): ValidationIssue[] {
       if (!item.name.trim() || item.name.length > 80) error(`${prefix}.name`, 'Enter an item name of 1–80 characters.');
       if (!whole(item.weight, 0, 1_000_000)) error(`${prefix}.weight`, 'Weight must be a whole number between 0 and 1,000,000.');
       total += item.weight;
+      if (project.integration === 'new' && !item.metadataUri.trim()) error(`${prefix}.metadataUri`, 'Set the final item metadata URI before generating the collection; it has no URI setter.');
       if (item.metadataUri && !/^(https:\/\/|ipfs:\/\/|ar:\/\/)/i.test(item.metadataUri)) error(`${prefix}.metadataUri`, 'Use an HTTPS, IPFS, or Arweave metadata reference.');
     });
     if (!Number.isSafeInteger(total) || total <= 0) error('loot.items', 'At least one item needs a positive weight.');
@@ -122,15 +125,18 @@ function oneOf<T extends string>(value: unknown, choices: readonly T[], path: st
   return value as T;
 }
 
-/** Decode a versioned data file, never trusting a TypeScript cast on imported JSON. */
+/** Decode and migrate data in memory; the original file/storage snapshot is never written here. */
 export function parseProjectJson(input: string): StudioProject {
   if (new TextEncoder().encode(input).byteLength > MAX_PROJECT_BYTES) throw new Error('Project files must be smaller than 512 KB.');
   let value: unknown;
   try { value = JSON.parse(input); } catch { throw new Error('The project file is not valid JSON.'); }
   const p = object(value, 'project', ['schemaVersion','id','name','mechanic','integration','network','createdAt','updatedAt','isExample','collection','loot','modules','payment']);
-  if (p.schemaVersion !== 1) throw new Error('Unsupported project schema. This Studio supports version 1.');
+  if (p.schemaVersion !== 1 && p.schemaVersion !== PROJECT_SCHEMA_VERSION) throw new Error('Unsupported project schema. This Studio reads version 1 and version 2 projects.');
   const c = object(p.collection, 'collection', ['name','symbol','standard','maxSupply','metadataBaseUri']);
-  const l = object(p.loot, 'loot', ['items','maxOpenings']);
+  const l = object(p.loot, 'loot', p.schemaVersion === 1 ? ['items','maxOpenings'] : ['items']);
+  // Removal is the only v1 migration. Validate the old value before discarding
+  // it so a malformed original is still preserved by workspace recovery.
+  if (p.schemaVersion === 1 && Object.hasOwn(l, 'maxOpenings')) number(l.maxOpenings, 'loot.maxOpenings');
   const m = object(p.modules, 'modules', ['premint','royalty']);
   const premint = object(m.premint, 'premint', ['enabled','quantity','recipient','includeInReveal']);
   const royalty = object(m.royalty, 'royalty', ['enabled','bps','recipient']);
@@ -141,13 +147,13 @@ export function parseProjectJson(input: string): StudioProject {
   const createdAt = text(p.createdAt, 'createdAt', 40), updatedAt = text(p.updatedAt, 'updatedAt', 40);
   if (!Number.isFinite(Date.parse(createdAt)) || !Number.isFinite(Date.parse(updatedAt))) throw new Error('Invalid project timestamps.');
   return {
-    schemaVersion: 1, id, name: text(p.name, 'name', 80),
+    schemaVersion: PROJECT_SCHEMA_VERSION, id, name: text(p.name, 'name', 80),
     mechanic: oneOf(p.mechanic, ['lootbox','reveal'], 'mechanic'),
     integration: oneOf(p.integration, ['new','existing'], 'integration'),
     network: oneOf(p.network, ['arc-testnet','arc-mainnet'], 'network'),
     createdAt, updatedAt, isExample: boolean(p.isExample, 'isExample'),
     collection: { name: text(c.name, 'collection.name', 80), symbol: text(c.symbol, 'symbol', 16), standard: oneOf(c.standard, ['erc721','erc1155'], 'standard'), maxSupply: number(c.maxSupply, 'maxSupply'), metadataBaseUri: text(c.metadataBaseUri, 'metadataBaseUri') },
-    loot: { maxOpenings: number(l.maxOpenings, 'maxOpenings'), items: l.items.map((item, index) => {
+    loot: { items: l.items.map((item, index) => {
       const i = object(item, `item ${index}`, ['id','tokenId','name','metadataUri','weight']);
       const tokenId = i.tokenId === undefined ? undefined : text(i.tokenId, 'item.tokenId', 78);
       if (tokenId !== undefined && !isTokenId(tokenId)) throw new Error('Invalid project: tokenId must be an unsigned decimal uint256.');

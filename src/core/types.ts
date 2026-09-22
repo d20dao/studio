@@ -13,7 +13,7 @@ export interface LootItem {
 }
 
 export interface StudioProject {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   name: string;
   mechanic: Mechanic;
@@ -29,7 +29,7 @@ export interface StudioProject {
     maxSupply: number;
     metadataBaseUri: string;
   };
-  loot: { items: LootItem[]; maxOpenings: number };
+  loot: { items: LootItem[] };
   modules: {
     premint: { enabled: boolean; quantity: number; recipient: string; includeInReveal: boolean };
     royalty: { enabled: boolean; bps: number; recipient: string };

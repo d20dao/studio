@@ -97,7 +97,12 @@ contract LifecycleCoordinator {
     }
 }
 
-interface IOpeningForTest { function open(bytes32 actionId) external payable returns (uint256); }
+interface IOpeningForTest {
+    function open(bytes32 actionId) external payable returns (uint256);
+    function openTo(bytes32 actionId, address recipient) external payable returns (uint256);
+    function setDeliveryRecipient(uint256 requestId, address recipient) external;
+    function deliver(uint256 requestId) external;
+}
 
 contract RewardReceiver is ERC1155Holder {
     bool public rejectTokens;
@@ -112,6 +117,41 @@ contract RewardReceiver is ERC1155Holder {
         return this.onERC1155Received.selector;
     }
     receive() external payable { require(!rejectNative, "receiver rejects native"); }
+}
+
+/// @dev Can request or redirect its own entitlement, but can never receive an ERC1155 safe mint.
+contract PermanentRejectingRequester {
+    address public immutable owner = msg.sender;
+    modifier onlyOwner() { require(msg.sender == owner, "only owner"); _; }
+    function open(address consumer, bytes32 actionId) external payable onlyOwner returns (uint256) {
+        return IOpeningForTest(consumer).open{value: msg.value}(actionId);
+    }
+    function openTo(address consumer, bytes32 actionId, address recipient) external payable onlyOwner returns (uint256) {
+        return IOpeningForTest(consumer).openTo{value: msg.value}(actionId, recipient);
+    }
+    function redirect(address consumer, uint256 requestId, address recipient) external onlyOwner {
+        IOpeningForTest(consumer).setDeliveryRecipient(requestId, recipient);
+    }
+    receive() external payable {}
+}
+
+contract ReentrantRewardReceiver is ERC1155Holder {
+    address private _consumer;
+    address private _replacement;
+    uint256 private _requestId;
+    bool public redirectSucceeded;
+    bool public duplicateDeliverySucceeded;
+    function open(address consumer, bytes32 actionId, address replacement) external payable returns (uint256) {
+        _consumer = consumer;
+        _replacement = replacement;
+        _requestId = IOpeningForTest(consumer).open{value: msg.value}(actionId);
+        return _requestId;
+    }
+    function onERC1155Received(address, address, uint256, uint256, bytes memory) public override returns (bytes4) {
+        try IOpeningForTest(_consumer).setDeliveryRecipient(_requestId, _replacement) { redirectSucceeded = true; } catch {}
+        try IOpeningForTest(_consumer).deliver(_requestId) { duplicateDeliverySucceeded = true; } catch {}
+        return this.onERC1155Received.selector;
+    }
 }
 
 contract DeploymentFactory {

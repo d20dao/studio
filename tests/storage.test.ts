@@ -123,4 +123,43 @@ describe('local workspace persistence', () => {
     expect(await saveBrowserWorkspace([createProject('Old draft', 'lootbox')], { expectedSnapshot: null }, { storage, locks, isCurrent: () => false })).toMatchObject({ ok: false, reason: 'cancelled' });
     expect(storage.getItem(WORKSPACE_KEY)).toBeNull();
   });
+
+  it('migrates legacy records in memory and preserves the raw snapshot until a normal save', () => {
+    const current = createProject('Full legacy project', 'lootbox', 'existing');
+    current.createdAt = '2026-09-22T01:02:03.004Z';
+    current.updatedAt = '2026-09-22T05:06:07.008Z';
+    current.modules.premint = { enabled: true, quantity: 8, recipient: '0x1111111111111111111111111111111111111111', includeInReveal: false };
+    current.modules.royalty = { enabled: true, bps: 600, recipient: '0x2222222222222222222222222222222222222222' };
+    current.payment = { price: '1.250000000000000001', rngPayer: 'developer', refundRecipient: 'custom', refundAddress: '0x3333333333333333333333333333333333333333', recovery: 'developer', applicationRefund: 'developer-defined' };
+    current.loot.items[1].metadataUri = 'ipfs://retained/metadata.json';
+    current.loot.items[1].tokenId = '9007199254740993';
+    const legacy = { ...current, schemaVersion: 1, loot: { ...current.loot, maxOpenings: 1000 } };
+    const other = createProject('Already current', 'reveal');
+    const original = JSON.stringify({ schemaVersion: 1, revision: 7, projects: [legacy, other] });
+    const storage = memory(original);
+    const loaded = loadWorkspace(storage);
+    expect(loaded).toMatchObject({ projects: [current, other], snapshot: original, revision: 7, rejectedProjects: 0 });
+    expect(loaded.error).toBeUndefined();
+    expect(storage.getItem(WORKSPACE_KEY)).toBe(original);
+    expect(saveWorkspace(loaded.projects, { expectedSnapshot: loaded.snapshot }, storage)).toMatchObject({ ok: true, revision: 8 });
+    const saved = storage.getItem(WORKSPACE_KEY)!;
+    expect(saved).not.toContain('maxOpenings');
+    expect(JSON.parse(saved)).toMatchObject({ schemaVersion: 1, projects: [{ schemaVersion: 2 }, { schemaVersion: 2 }] });
+    expect(loadWorkspace(storage).projects).toEqual([current, other]);
+    expect(WORKSPACE_KEY).toBe('d20dao.studio.workspace.v1');
+  });
+
+  it('keeps malformed legacy records intact and refuses an ordinary overwrite after partial migration', () => {
+    const current = createProject('Good legacy', 'lootbox');
+    const good = { ...current, schemaVersion: 1, loot: { ...current.loot, maxOpenings: 1000 } };
+    const broken = { ...createProject('Malformed legacy', 'reveal'), schemaVersion: 1, loot: { items: [], maxOpenings: 'not a number' } };
+    const original = JSON.stringify({ schemaVersion: 1, projects: [good, broken] });
+    const storage = memory(original);
+    const loaded = loadWorkspace(storage);
+    expect(loaded.projects).toEqual([current]);
+    expect(loaded.rejectedProjects).toBe(1);
+    expect(loaded.snapshot).toBe(original);
+    expect(saveWorkspace(loaded.projects, { expectedSnapshot: original }, storage)).toMatchObject({ ok: false, reason: 'recovery-required' });
+    expect(storage.getItem(WORKSPACE_KEY)).toBe(original);
+  });
 });

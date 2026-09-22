@@ -55,7 +55,9 @@ export function parseItemsImport(text: string, format: 'json' | 'csv'): ItemImpo
       } catch (error) { errors.push(`Item ${index + 1}: ${error instanceof Error ? error.message : 'invalid data'}`); return null; }
     }).filter((item): item is LootItem => item !== null);
     if (!errors.length) {
-      const draft = createProject('Item import validation', 'lootbox'); draft.loot.items = items;
+      // Import accepts incomplete metadata for editing and existing integrations.
+      // The destination project enforces metadata requirements before generation.
+      const draft = createProject('Item import validation', 'lootbox', 'existing'); draft.loot.items = items;
       errors.push(...validateProject(draft).filter(issue => issue.severity === 'error').map(issue => issue.message));
     }
     return { items, errors };

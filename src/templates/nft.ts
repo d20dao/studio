@@ -106,6 +106,11 @@ ${premint > 0 ? `        mintedSupply = PREMINT_QUANTITY;
         --reservedSupply;
     }
 
+    function updateRecipient(bytes32 actionKey, address recipient) external onlyController {
+        if (recipient == address(0) || reservedRecipient[actionKey] == address(0) || completed[actionKey]) revert InvalidReservation();
+        reservedRecipient[actionKey] = recipient;
+    }
+
     function deliver(bytes32 actionKey, uint256 tokenId) external onlyController nonReentrant {
         address recipient = reservedRecipient[actionKey];
         if (recipient == address(0) || completed[actionKey]) revert InvalidReservation();
@@ -134,6 +139,7 @@ interface ID20LootCollection {
     function CONFIG_DIGEST() external view returns (bytes32);
     function reserve(bytes32 actionKey, address recipient) external;
     function release(bytes32 actionKey) external;
+    function updateRecipient(bytes32 actionKey, address recipient) external;
     function deliver(bytes32 actionKey, uint256 tokenId) external;
 }
 
@@ -141,19 +147,18 @@ interface ID20LootCollection {
 contract D20LootStarter is D20VRFConsumer {
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
     uint32 public constant CALLBACK_GAS = 100_000;
-    uint256 public constant MAX_OPENINGS = ${project.loot.maxOpenings};
     uint256 public constant TOTAL_WEIGHT = ${total};
     uint256[${weights.length}] private _weights = [${weights.map(value => `uint256(${value})`).join(', ')}];
     uint256[${weights.length}] private _tokenIds = [${project.loot.items.map((item, index) => `uint256(${effectiveTokenId(item, index)})`).join(', ')}];
     ID20LootCollection public immutable collection;
-    struct Opening { address requester; bytes32 actionKey; bytes32 word; bool ready; bool refunded; bool delivered; }
+    struct Opening { address requester; bytes32 actionKey; bytes32 word; bool ready; bool refunded; bool delivered; address deliveryRecipient; }
     mapping(uint256 => Opening) public openings;
     mapping(bytes32 => uint256) public requestForAction;
-    uint256 public admittedActions;
     error InvalidCollection();
     error InvalidAction();
+    error InvalidRecipient();
+    error OnlyRequester();
     error ActionAlreadyRequested();
-    error OpeningLimit();
     error Underpaid(uint256 required, uint256 sent);
     error UnexpectedCallback();
     error NotReady();
@@ -162,6 +167,7 @@ contract D20LootStarter is D20VRFConsumer {
     event OpeningReady(uint256 indexed requestId, bytes32 word);
     event OpeningRefunded(uint256 indexed requestId);
     event RewardDelivered(uint256 indexed requestId, uint256 indexed tokenId, address indexed recipient);
+    event DeliveryRecipientChanged(uint256 indexed requestId, address indexed previousRecipient, address indexed recipient);
 
     constructor(address coordinator, address collection_) D20VRFConsumer(coordinator) {
         if (collection_.code.length == 0) revert InvalidCollection();
@@ -171,22 +177,28 @@ contract D20LootStarter is D20VRFConsumer {
 
     /// @dev One sender-scoped action, one reward; caller funds RNG and receives protocol refunds/credits.
     function open(bytes32 actionId) external payable returns (uint256 requestId) {
+        return _open(actionId, msg.sender);
+    }
+
+    /// @notice Choose an NFT recipient independently of the requester and its protocol refund address.
+    function openTo(bytes32 actionId, address recipient) external payable returns (uint256 requestId) {
+        return _open(actionId, recipient);
+    }
+
+    function _open(bytes32 actionId, address recipient) internal returns (uint256 requestId) {
         if (actionId == bytes32(0)) revert InvalidAction();
+        if (recipient == address(0)) revert InvalidRecipient();
         bytes32 actionKey = keccak256(abi.encode(msg.sender, actionId));
         uint256 previous = requestForAction[actionKey];
         if (previous != 0 && !openings[previous].refunded) revert ActionAlreadyRequested();
-        if (previous == 0) {
-            if (admittedActions >= MAX_OPENINGS) revert OpeningLimit();
-            ++admittedActions;
-        }
         uint256 fee = ID20VRF(vrfCoordinator).quoteFee(CALLBACK_GAS);
         if (msg.value < fee) revert Underpaid(fee, msg.value);
-        collection.reserve(actionKey, msg.sender);
+        collection.reserve(actionKey, recipient);
         RandomnessMapping.Spec memory spec = RandomnessMapping.Spec(RandomnessMapping.Operation.NumberRange, 1, TOTAL_WEIGHT, 1, 0);
         requestId = ID20VRF(vrfCoordinator).requestMappedRandomness{value: msg.value}(
             keccak256(abi.encode(CONFIG_DIGEST, actionKey)), CALLBACK_GAS, msg.sender, spec
         );
-        openings[requestId] = Opening(msg.sender, actionKey, bytes32(0), false, false, false);
+        openings[requestId] = Opening(msg.sender, actionKey, bytes32(0), false, false, false, recipient);
         requestForAction[actionKey] = requestId;
         emit OpeningRequested(actionKey, requestId, msg.sender);
     }
@@ -223,15 +235,30 @@ contract D20LootStarter is D20VRFConsumer {
 
     function rewardTokenId(uint256 requestId) public view returns (uint256) { return _tokenIds[rewardIndex(requestId)]; }
 
+    /// @notice Recover delivery to an unsupported NFT receiver without changing the accepted outcome.
+    /// @dev Only the original requester can redirect its outstanding accepted entitlement.
+    function setDeliveryRecipient(uint256 requestId, address recipient) external {
+        Opening storage opening = openings[requestId];
+        if (msg.sender != opening.requester) revert OnlyRequester();
+        if (!opening.ready || opening.refunded) revert NotReady();
+        if (opening.delivered) revert AlreadyDelivered();
+        if (recipient == address(0)) revert InvalidRecipient();
+        address previousRecipient = opening.deliveryRecipient;
+        opening.deliveryRecipient = recipient;
+        collection.updateRecipient(opening.actionKey, recipient);
+        emit DeliveryRecipientChanged(requestId, previousRecipient, recipient);
+    }
+
     /// @notice Anyone may complete the recorded outcome; the recipient and token ID cannot be chosen by the caller.
     function deliver(uint256 requestId) external {
         Opening storage opening = openings[requestId];
         if (!opening.ready) revert NotReady();
         if (opening.delivered) revert AlreadyDelivered();
         uint256 tokenId = rewardTokenId(requestId);
+        address recipient = opening.deliveryRecipient;
         opening.delivered = true;
         collection.deliver(opening.actionKey, tokenId);
-        emit RewardDelivered(requestId, tokenId, opening.requester);
+        emit RewardDelivered(requestId, tokenId, recipient);
     }
 }
 `;

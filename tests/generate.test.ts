@@ -7,10 +7,10 @@ import type { StudioProject } from '../src/core/types';
 
 function project(overrides: Partial<StudioProject> = {}): StudioProject {
   return {
-    schemaVersion: 1, id: 'studio-test-project', name: 'Ancient Chest', mechanic: 'lootbox', integration: 'new', network: 'arc-testnet',
+    schemaVersion: 2, id: 'studio-test-project', name: 'Ancient Chest', mechanic: 'lootbox', integration: 'new', network: 'arc-testnet',
     createdAt: '2026-09-22T00:00:00.000Z', updatedAt: '2026-09-22T00:00:00.000Z', isExample: false,
     collection: { name: 'Ancient Collection', symbol: 'AC', standard: 'erc1155', maxSupply: 64, metadataBaseUri: 'ipfs://collection/' },
-    loot: { maxOpenings: 100, items: [
+    loot: { items: [
       { id: 'common', name: 'Common', metadataUri: 'ipfs://common', weight: 600 },
       { id: 'rare', name: 'Rare', metadataUri: 'ipfs://rare', weight: 400 },
     ] },
@@ -21,6 +21,20 @@ function project(overrides: Partial<StudioProject> = {}): StudioProject {
 }
 
 describe('project generation', () => {
+  it.each(['new', 'existing'] as const)('exports %s loot without a separate opening quota', async integration => {
+    const input = project({ integration });
+    const bundle = await generateProject(input);
+    const source = bundle.files.find(file => file.path === 'contracts/D20LootStarter.sol')!.content;
+    expect(source).not.toMatch(/MAX_OPENINGS|OpeningLimit|admittedActions/);
+    expect(source).toContain('revert ActionAlreadyRequested()');
+    expect(JSON.parse(bundle.files.find(file => file.path === 'studio.project.json')!.content).loot).not.toHaveProperty('maxOpenings');
+    for (const path of ['README.md', 'AGENTS.md', 'AGENT_PROMPT.md']) {
+      const instructions = bundle.files.find(file => file.path === path)!.content;
+      expect(instructions).toContain('There is no separate lifetime opening quota.');
+      expect(instructions).not.toContain('The opening cap counts');
+    }
+    if (integration === 'new') expect(source).toContain('collection.reserve(actionKey, recipient)');
+  });
   it('is deterministic and distinguishes configuration identity from edit timestamps', async () => {
     const input = project();
     const first = await generateProject(input);
@@ -33,7 +47,7 @@ describe('project generation', () => {
     const changed = await generateProject({ ...input, name: 'Different collection' });
     expect(changed.fingerprint).not.toBe(first.fingerprint);
     const manifest = JSON.parse(first.files.find((file) => file.path === 'GENERATION-MANIFEST.json')!.content);
-    expect(manifest.versions).toMatchObject({ sdk: '0.4.0', solc: '0.8.28', evmVersion: 'cancun' });
+    expect(manifest.versions).toMatchObject({ generator: '0.3.0', sdk: '0.4.0', solc: '0.8.28', evmVersion: 'cancun' });
     expect(manifest.checks.solidityCompilation).toBe('not-run-by-generator');
   });
 

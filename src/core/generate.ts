@@ -4,7 +4,7 @@ import { effectiveTokenId, nftFiles } from '../templates/nft';
 
 const SDK_VERSION = '0.4.0';
 const SOLC_VERSION = '0.8.28';
-const TEMPLATE_VERSION = '0.2.0';
+const TEMPLATE_VERSION = '0.3.0';
 const OPENZEPPELIN_VERSION = '5.6.1';
 
 function ordered(value: unknown): unknown {
@@ -51,18 +51,15 @@ function lootSource(project: StudioProject, fingerprint: string): string {
 contract D20LootStarter is D20VRFConsumer {
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
     uint32 public constant CALLBACK_GAS = 100_000;
-    uint256 public constant MAX_OPENINGS = ${project.loot.maxOpenings};
     uint256 public constant TOTAL_WEIGHT = ${total};
     uint256[${weights.length}] private _weights = [${weights.map((weight) => `uint256(${weight})`).join(', ')}];
 
     struct Opening { address requester; bytes32 actionKey; bytes32 word; bool ready; bool refunded; }
     mapping(uint256 => Opening) public openings;
     mapping(bytes32 => uint256) public requestForAction;
-    uint256 public admittedActions;
 
     error InvalidAction();
     error ActionAlreadyRequested();
-    error OpeningLimit();
     error Underpaid(uint256 required, uint256 sent);
     error UnexpectedCallback();
     error NotReady();
@@ -80,10 +77,6 @@ contract D20LootStarter is D20VRFConsumer {
         bytes32 actionKey = keccak256(abi.encode(msg.sender, actionId));
         uint256 previous = requestForAction[actionKey];
         if (previous != 0 && !openings[previous].refunded) revert ActionAlreadyRequested();
-        if (previous == 0) {
-            if (admittedActions >= MAX_OPENINGS) revert OpeningLimit();
-            ++admittedActions;
-        }
         uint256 fee = ID20VRF(vrfCoordinator).quoteFee(CALLBACK_GAS);
         if (msg.value < fee) revert Underpaid(fee, msg.value);
         RandomnessMapping.Spec memory spec = RandomnessMapping.Spec(
@@ -207,7 +200,7 @@ function integrationNotes(project: StudioProject): string {
   const selectedFeatures = [
     target,
     isNew
-      ? `Selected collection standard: ${project.collection.standard}. Collection supply, metadata getters and fixed-recipient delivery are implemented. Provide the final hosted metadata before generation; no upload occurs and a mutable URI does not establish immutable content.`
+      ? `Selected collection standard: ${project.collection.standard}. Collection supply and metadata getters are implemented; delivery and recovery follow the selected template described below. Provide the final hosted metadata before generation; no upload occurs and a mutable URI does not establish immutable content.`
       : `Selected collection standard: ${project.collection.standard}. Supply accounting, canonical token IDs, image/metadata hosting, and asset delivery remain integration work.`,
     project.modules.royalty.enabled
       ? isNew
@@ -229,8 +222,8 @@ function integrationNotes(project: StudioProject): string {
     'Pin the chosen network deployment manifest, coordinator implementation, and SDK provenance before use. Arc request fees are native USDC with 18 decimals; no live network configuration was checked during export.',
   ];
   if (project.mechanic === 'lootbox') {
-    selectedFeatures.push('Loot model: one independent weighted draw per action; no per-item finite inventory or multi-reward allocation. Integer weights are fixed in this consumer. Bind an authenticated game/opening entitlement to its canonical actionId when your game requires one; a caller-chosen ID alone does not prove entitlement. The opening cap counts distinct admitted actions; settled expired attempts can retry the same action without spending another opening.');
-    if (isNew) selectedFeatures.push('Reward delivery: open reserves one unit of the total collection supply. Anyone can call deliver(requestId) after the small callback; the recorded requester and selected token ID are fixed. A rejecting NFT receiver leaves delivery retryable with the same result. A settled refund notification releases the reservation; retrying that expired action must acquire capacity again and can fail if the collection has since filled. Token IDs are each explicit decimal tokenId, or the zero-based item-row index when omitted. Each URI is exactly that item\'s metadataUri. There is no owner mint beyond configured constructor premint and consumer delivery.');
+    selectedFeatures.push('Loot model: one independent weighted draw per action; no per-item finite inventory or multi-reward allocation. Integer weights are fixed in this consumer. Bind an authenticated game/opening entitlement to its canonical actionId when your game requires one; a caller-chosen ID alone does not prove entitlement. There is no separate lifetime opening quota. Settled expired attempts can retry the same action; pending or accepted actions cannot be requested again. New collections enforce their total supply, including premints and reservations; existing-project adapters require host inventory and eligibility checks.');
+    if (isNew) selectedFeatures.push('Reward delivery: open(actionId) reserves one unit for the caller; openTo(actionId, recipient) records a separate NFT recipient for contracts that cannot receive ERC-1155 tokens. RNG refunds still go to the original caller. Anyone can call deliver(requestId) after the small callback, but cannot choose its recipient or token. If delivery fails, only the original requester can call setDeliveryRecipient(requestId, recipient) for an accepted, undelivered request; the accepted word, action, selected token and supply reservation remain unchanged. Integrating contracts must expose this recovery call or choose a compatible recipient up front. Never cancel an accepted reward to reroll it. A settled expiry refund notification releases the reservation; retrying that expired action must acquire capacity again and can fail if the collection has since filled. Token IDs are each explicit decimal tokenId, or the zero-based item-row index when omitted. Each URI is exactly that item\'s metadataUri and must be configured before generation. There is no owner mint beyond configured constructor premint and consumer delivery.');
   } else {
     selectedFeatures.push(isNew
       ? 'Reveal model: owner distributes the remaining ERC-721 supply via mint(recipient, quantity), at most 64 per call, then closeMint() after every configured token is minted. Token IDs are 0..maxSupply-1. The operator requests only after closure. Anyone can call finalizeReveal() after callback; it installs the accepted permutation exactly once. The shuffled range starts after excluded premints; included premints start at index zero. tokenURI is empty until reveal, except excluded premints; final URI is metadataBaseUri + metadataIndex + ".json". The prefix and rule have no setters. Set a lower maxSupply before generation if you intend to reveal a smaller collection; partial-supply closure is deliberately unsupported.'
@@ -334,7 +327,7 @@ Review unauthorized actions, action-ID reuse, out-of-order/duplicate callbacks, 
   }
   const implementedFeatures = kind === 'plan' ? [] : [
     'authenticated VRF callbacks', 'request identity and same-result retry', 'fixed caller protocol refund recipient',
-    ...(isNew ? [project.mechanic === 'lootbox' ? 'ERC-1155 weighted reward collection' : 'ERC-721 bounded reveal collection', 'one-time owner-controlled consumer wiring', 'supply enforcement', 'fixed NFT metadata rules', project.mechanic === 'lootbox' ? 'reserved fixed-beneficiary NFT delivery' : 'explicit operator and permissionless reveal finalization', ...(project.modules.premint.enabled ? ['configured constructor premint'] : []), ...(project.modules.royalty.enabled ? ['configured fixed ERC-2981 royalties'] : [])] : ['existing-contract consumer adapter; external hooks unimplemented']),
+    ...(isNew ? [project.mechanic === 'lootbox' ? 'ERC-1155 weighted reward collection' : 'ERC-721 bounded reveal collection', 'one-time owner-controlled consumer wiring', 'supply enforcement', 'fixed NFT metadata rules', project.mechanic === 'lootbox' ? 'reserved NFT delivery with requester-authorized recipient recovery' : 'explicit operator and permissionless reveal finalization', ...(project.modules.premint.enabled ? ['configured constructor premint'] : []), ...(project.modules.royalty.enabled ? ['configured fixed ERC-2981 royalties'] : [])] : ['existing-contract consumer adapter; external hooks unimplemented']),
   ];
   const integrationRequired = [
     ...(isNew ? ['deploy correct collection/consumer pair and wire controller once', 'final hosted metadata and content availability', 'client/operator application-delivery transactions'] : ['existing collection/game interfaces, supply and asset-delivery hooks', ...(project.modules.royalty.enabled ? ['selected royalty adapter'] : []), ...(project.modules.premint.enabled ? ['selected premint adapter'] : [])]),

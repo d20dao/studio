@@ -10,7 +10,7 @@ describe('versioned projects', () => {
   });
   it('rejects unsupported versions and structurally invalid imported fields', () => {
     const project = createProject('Loot', 'lootbox');
-    expect(() => parseProjectJson(JSON.stringify({ ...project, schemaVersion: 2 }))).toThrow('schema');
+    expect(() => parseProjectJson(JSON.stringify({ ...project, schemaVersion: 3 }))).toThrow('schema');
     expect(() => parseProjectJson(JSON.stringify({ ...project, modules: {} }))).toThrow('premint');
     expect(() => parseProjectJson(JSON.stringify({ ...project, network: 'unknown-chain' }))).toThrow('network');
     expect(() => parseProjectJson(JSON.stringify({ ...project, codeToExecute: 'arbitrary' }))).toThrow('unsupported field');
@@ -41,6 +41,46 @@ describe('versioned projects', () => {
     project.loot.items[0].metadataUri = `https://example.com/${'a'.repeat(600)}`;
     expect(validateProject(project).some(issue => issue.severity === 'error')).toBe(true);
     expect(() => parseProjectJson(JSON.stringify(project))).toThrow('bounded text');
+  });
+  it('requires immutable metadata before generating a new reveal but keeps existing adapters optional', () => {
+    const project = createProject('Collection', 'reveal');
+    expect(validateProject(project).filter(issue => issue.path === 'collection.metadataBaseUri')).toEqual([
+      expect.objectContaining({ path: 'collection.metadataBaseUri', severity: 'error' }),
+    ]);
+    // This remains a storable incomplete draft, not structurally corrupt data.
+    expect(parseProjectJson(JSON.stringify(project))).toEqual(project);
+    project.integration = 'existing';
+    expect(validateProject(project).filter(issue => issue.path === 'collection.metadataBaseUri')).toEqual([
+      expect.objectContaining({ path: 'collection.metadataBaseUri', severity: 'warning' }),
+    ]);
+    for (const integration of ['new', 'existing'] as const) {
+      project.integration = integration;
+      project.collection.metadataBaseUri = 'https://metadata.example.invalid/collection/';
+      expect(validateProject(project).filter(issue => issue.path === 'collection.metadataBaseUri')).toEqual([]);
+    }
+  });
+  it('identifies each missing new-collection item URI while allowing existing loot integration hooks', () => {
+    const project = createProject('Loot', 'lootbox');
+    expect(validateProject(project).filter(issue => issue.path.endsWith('.metadataUri')).map(issue => ({ path: issue.path, severity: issue.severity }))).toEqual([
+      { path: 'loot.items.0.metadataUri', severity: 'error' },
+      { path: 'loot.items.1.metadataUri', severity: 'error' },
+      { path: 'loot.items.2.metadataUri', severity: 'error' },
+    ]);
+    expect(parseProjectJson(JSON.stringify(project))).toEqual(project);
+    project.integration = 'existing';
+    expect(validateProject(project).filter(issue => issue.path.endsWith('.metadataUri'))).toEqual([]);
+    project.integration = 'new';
+    const references = ['https://metadata.example.invalid/items/0.json', 'ipfs://collection/1.json', 'ar://transaction/2.json'];
+    project.loot.items.forEach((item, index) => { item.metadataUri = references[index]; });
+    expect(validateProject(project).filter(issue => issue.severity === 'error')).toEqual([]);
+  });
+  it.each(['new', 'existing'] as const)('keeps URI protocol validation for %s integrations', integration => {
+    const loot = createProject('Loot', 'lootbox', integration);
+    loot.loot.items[1].metadataUri = 'http://metadata.example.invalid/item.json';
+    expect(validateProject(loot)).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'loot.items.1.metadataUri', severity: 'error' })]));
+    const reveal = createProject('Collection', 'reveal', integration);
+    reveal.collection.metadataBaseUri = 'javascript:invalid';
+    expect(validateProject(reveal)).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'collection.metadataBaseUri', severity: 'error' })]));
   });
   it('preserves optional uint256 token IDs without number precision loss and supports old files', () => {
     const project = createProject('Loot', 'lootbox');
@@ -88,5 +128,47 @@ describe('versioned projects', () => {
     expect(parseRoute(routeHash(route), [])).toEqual({ page: 'projects' });
     expect(parseRoute('#/project/%E0%A4%A/files', [project])).toEqual({ page: 'projects' });
     expect(parseRoute('#/new', [project])).toEqual({ page: 'create' });
+  });
+
+  it.each(['lootbox', 'reveal'] as const)('migrates a legacy %s project and import without changing any other value', mechanic => {
+    const current = createProject('Legacy configured project', mechanic, 'existing');
+    current.createdAt = '2026-09-22T01:02:03.004Z';
+    current.updatedAt = '2026-09-22T05:06:07.008Z';
+    current.isExample = true;
+    current.modules.premint = { enabled: true, quantity: 5, recipient: '0x1111111111111111111111111111111111111111', includeInReveal: false };
+    current.modules.royalty = { enabled: true, bps: 750, recipient: '0x2222222222222222222222222222222222222222' };
+    current.payment = { price: '2.500000000000000001', rngPayer: 'developer', refundRecipient: 'custom', refundAddress: '0x3333333333333333333333333333333333333333', recovery: 'both', applicationRefund: 'developer-defined' };
+    current.loot.items[0].tokenId = ((1n << 256n) - 1n).toString();
+    current.loot.items[0].metadataUri = 'ipfs://original/{id}.json';
+    const original = JSON.stringify({ ...current, schemaVersion: 1, loot: { ...current.loot, maxOpenings: 700 } });
+    const migrated = parseProjectJson(original);
+    expect(migrated).toEqual(current);
+    expect(importProjects(original)).toEqual([current]);
+    expect(importProjects(JSON.stringify({ schemaVersion: 1, projects: [JSON.parse(original)] }))).toEqual([current]);
+    expect(migrated.schemaVersion).toBe(2);
+    expect(JSON.stringify(migrated)).not.toContain('maxOpenings');
+    expect(parseProjectJson(JSON.stringify(migrated))).toEqual(current);
+  });
+
+  it('accepts absent or finite legacy limits but rejects malformed removed values before migration', () => {
+    const project = createProject('Legacy draft', 'lootbox');
+    const legacy = { ...project, schemaVersion: 1 };
+    expect(parseProjectJson(JSON.stringify(legacy))).toEqual(project);
+    for (const maxOpenings of [0, -1, 1.5, Number.MAX_VALUE]) {
+      expect(parseProjectJson(JSON.stringify({ ...legacy, loot: { ...legacy.loot, maxOpenings } }))).toEqual(project);
+    }
+    for (const maxOpenings of [null, '1000', true, {}, []]) {
+      expect(() => parseProjectJson(JSON.stringify({ ...legacy, loot: { ...legacy.loot, maxOpenings } }))).toThrow('finite number');
+    }
+    const overflow = JSON.stringify({ ...legacy, loot: { ...legacy.loot, maxOpenings: 1000 } }).replace('"maxOpenings":1000', '"maxOpenings":1e999');
+    expect(() => parseProjectJson(overflow)).toThrow('finite number');
+  });
+
+  it('never accepts the removed field in schema 2 or strips unrelated legacy fields', () => {
+    const project = createProject('Current project', 'lootbox');
+    expect(project.schemaVersion).toBe(2);
+    expect(project.loot).not.toHaveProperty('maxOpenings');
+    expect(() => parseProjectJson(JSON.stringify({ ...project, loot: { ...project.loot, maxOpenings: 1000 } }))).toThrow('unsupported field');
+    expect(() => parseProjectJson(JSON.stringify({ ...project, schemaVersion: 1, loot: { ...project.loot, maxOpenings: 1000, futureSetting: true } }))).toThrow('unsupported field');
   });
 });
