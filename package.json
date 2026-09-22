@@ -8,9 +8,14 @@
   },
   "scripts": {
     "prepare:compiler": "node scripts/prepare-compiler.mjs",
+    "predev": "npm run prepare:compiler",
+    "dev": "vite --host 127.0.0.1 --port 5178 --strictPort",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prebuild": "npm run prepare:compiler",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4178 --strictPort"
   },
   "dependencies": {
     "fflate": "0.8.3",
