@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>D20DAO Studio — Interface concepts</title>
+  <style>
+    :root{color-scheme:dark;font-family:Arial,Helvetica,sans-serif;background:#000;color:#fff;--pink:#ff3366;--line:#ffffff29;--muted:#ffffffae}
+    *{box-sizing:border-box}body{margin:0}a{color:inherit;text-decoration:none}button{font:inherit;cursor:pointer}a:focus-visible,button:focus-visible{outline:2px solid #ffd447;outline-offset:5px}
+    header{display:flex;justify-content:space-between;align-items:center;gap:24px;padding:24px 32px;border-bottom:1px solid var(--line)}.brand{font-size:24px;font-weight:700;letter-spacing:-1px}.brand span{color:var(--pink)}.product{border-left:1px solid var(--line);margin-left:20px;padding-left:20px;font:14px 'Courier New',monospace;color:var(--muted)}.note{font:13px 'Courier New',monospace;color:var(--muted)}
+    main{display:grid;grid-template-columns:230px minmax(0,1fr);min-height:calc(100vh - 79px)}nav{padding:30px 16px;border-right:1px solid var(--line)}nav a{display:block;padding:13px 16px;border-left:2px solid transparent;font:14px 'Courier New',monospace;color:var(--muted)}nav a:hover{color:#fff}nav a[aria-current="page"]{border-left-color:var(--pink);color:#fff;background:#ffffff05}.nav-note{margin:28px 16px;font-size:13px;line-height:1.6;color:var(--muted)}
+    article{padding:28px 32px;min-width:0}.heading{display:flex;justify-content:space-between;align-items:start;gap:24px}.eyebrow{font:13px 'Courier New',monospace;color:var(--pink);margin:0 0 10px}h1{font-size:clamp(25px,2.6vw,38px);letter-spacing:-1.2px;font-weight:500;line-height:1.15;margin:0 0 12px}.description{color:var(--muted);font-size:15px;line-height:1.6;margin:0;max-width:780px}.original{border:1px solid var(--line);padding:12px 15px;white-space:nowrap;font:13px 'Courier New',monospace}.original:hover{border-color:var(--pink)}figure{margin:26px 0 0}figure img{display:block;width:100%;height:auto;border:1px solid var(--line);background:#060606}figcaption{display:flex;justify-content:space-between;gap:20px;margin-top:14px;font:12px 'Courier New',monospace;color:var(--muted)}.controls{display:flex;justify-content:space-between;align-items:center;margin-top:26px;padding-top:20px;border-top:1px solid var(--line)}.controls button{background:transparent;border:1px solid var(--line);color:#fff;padding:10px 16px;font:13px 'Courier New',monospace}.controls button:hover{border-color:var(--pink)}.controls button:disabled{opacity:.3;cursor:default}.counter{font:13px 'Courier New',monospace;color:var(--muted)}
+    @media(max-width:850px){header{padding:20px}.note{display:none}main{grid-template-columns:1fr}nav{display:flex;overflow:auto;border-right:0;border-bottom:1px solid var(--line);padding:10px}nav a{white-space:nowrap;padding:12px;border-left:0;border-bottom:2px solid transparent}nav a[aria-current="page"]{border-bottom-color:var(--pink)}.nav-note{display:none}article{padding:24px 16px}.heading{display:block}.original{display:inline-block;margin-top:18px}figcaption{font-size:12px;line-height:1.5}.product{margin-left:14px;padding-left:14px}}
+  </style>
+</head>
+<body>
+  <header><div><a class="brand" href="#projects"><span>D</span>20DAO</a><span class="product">Studio / Concepts</span></div><span class="note">Astra medium + ImageGen · 9 desktop screens</span></header>
+  <main>
+    <nav aria-label="Interface concepts">
+      <a href="#projects" data-screen="projects">01 / Projects</a>
+      <a href="#new-project" data-screen="new-project">02 / New project</a>
+      <a href="#lootbox" data-screen="lootbox">03 / Lootbox</a>
+      <a href="#nft-reveal" data-screen="nft-reveal">04 / NFT reveal</a>
+      <a href="#files-compile" data-screen="files-compile">05 / Files & compile</a>
+      <a href="#agent-export" data-screen="agent-export">06 / Agent & export</a>
+      <a href="#payment-recovery" data-screen="payment-recovery">07 / Payment & recovery</a>
+      <a href="#optional-modules" data-screen="optional-modules">08 / Optional modules</a>
+      <a href="#project-overview" data-screen="project-overview">09 / Project overview</a>
+      <p class="nav-note">Visual concepts based on the existing D20DAO website. These images describe an interface direction; they are not a working Studio application.</p>
+    </nav>
+    <article>
+      <div class="heading"><div><p class="eyebrow" id="eyebrow">01 / INTERFACE CONCEPT</p><h1 id="title">Projects</h1><p class="description" id="description">Create and reopen local projects.</p></div><a class="original" id="original" href="concepts/01-projects.png" target="_blank" rel="noopener">Open original image</a></div>
+      <figure><img id="concept" src="concepts/01-projects.png" alt="D20DAO Studio Projects interface concept"><figcaption><span>Design concept · illustrative content</span><span>Original ImageGen output</span></figcaption></figure>
+      <div class="controls"><button type="button" id="previous">Previous</button><span class="counter" id="counter">1 / 9</span><button type="button" id="next">Next</button></div>
+      <noscript><p>JavaScript is disabled. Open the original image above or use the Markdown index to view all concepts.</p></noscript>
+    </article>
+  </main>
+  <script>
+    const screens=[
+      {id:'projects',title:'Projects',file:'01-projects.png',description:'A compact local-project list with creation and import actions.'},
+      {id:'new-project',title:'New project',file:'02-new-project.png',description:'Choose a mechanic and define whether the starter is for a new project or an existing application.'},
+      {id:'lootbox',title:'Lootbox configuration',file:'03-lootbox.png',description:'Configure assets, item metadata, selection weights, and optional modules in a practical working surface.'},
+      {id:'nft-reveal',title:'NFT reveal configuration',file:'04-nft-reveal.png',description:'Define the participating token set, metadata, premint policy, and royalty options.'},
+      {id:'files-compile',title:'Files and compilation',file:'05-files-compile.png',description:'Review generated files, inspect Solidity, and see the proposed browser-compiler controls in their initial state.'},
+      {id:'agent-export',title:'Agent handoff and export',file:'06-agent-export.png',description:'Review project-specific agent instructions and export the files needed to continue in an application repository.'},
+      {id:'payment-recovery',title:'Payment and recovery',file:'07-payment-recovery.png',description:'Define the application payment, RNG fee payer, fixed refund recipient, and who handles recovery in the application flow.'},
+      {id:'optional-modules',title:'Optional modules',file:'08-optional-modules.png',description:'Expand premint and royalty settings, with clear consequences for generated code and agent instructions.'},
+      {id:'project-overview',title:'Project overview',file:'09-project-overview.png',description:'Set project identity, generation context, and network reference, then continue to configuration or generated files.'}
+    ];
+    const image=document.getElementById('concept'),previous=document.getElementById('previous'),next=document.getElementById('next');let selected=0;
+    function render(){const key=location.hash.slice(1);selected=Math.max(0,screens.findIndex(s=>s.id===key));const screen=screens[selected];document.getElementById('eyebrow').textContent=String(selected+1).padStart(2,'0')+' / INTERFACE CONCEPT';document.getElementById('title').textContent=screen.title;document.getElementById('description').textContent=screen.description;image.src='concepts/'+screen.file;image.alt='D20DAO Studio '+screen.title+' interface concept';document.getElementById('original').href=image.getAttribute('src');document.getElementById('counter').textContent=(selected+1)+' / '+screens.length;previous.disabled=selected===0;next.disabled=selected===screens.length-1;document.querySelectorAll('[data-screen]').forEach(link=>{if(link.dataset.screen===screen.id)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current')});document.title='D20DAO Studio — '+screen.title+' concept'}
+    previous.addEventListener('click',()=>{if(selected>0)location.hash=screens[selected-1].id});next.addEventListener('click',()=>{if(selected<screens.length-1)location.hash=screens[selected+1].id});window.addEventListener('hashchange',render);render();
+  </script>
+</body>
+</html>
