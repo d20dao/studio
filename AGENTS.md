@@ -20,6 +20,8 @@ Studio is a local-first developer tool for configuring D20DAO game and NFT integ
 - The 60-second protocol window is a proof-acceptance deadline. An accepted proof with a failed callback uses same-word delivery retry, not an RNG fee refund.
 - Protocol refunds are permissionless and pay the request's fixed recipient. The recovery-responsibility setting describes the application's workflow, not access control on the coordinator.
 - RNG fees, overpayment credits, application prices, and NFT/material custody are separate accounting domains.
+- New NFT collections require metadata references before generation because their URI configuration has no setter. Keep generic item import usable for incomplete drafts and existing-contract integrations; validate readiness on the destination project.
+- Loot opening has no separate lifetime request quota. Supply includes premint, minted units and outstanding reservations. Recipient recovery may change only the delivery address, by the original requester after acceptance and before delivery; it must never change the word, token, action or protocol refund recipient.
 
 ## Implementation rules
 
