@@ -1,0 +1,15 @@
+node_modules/
+dist/
+public/compiler/soljson*.js
+public/compiler/dependencies.json
+public/compiler/manifest.json
+.env
+.env.*
+!.env.example
+*.log
+.playwright-cli/
+test-results/
+coverage/
+artifacts/
+.DS_Store
+Thumbs.db

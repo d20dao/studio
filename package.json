@@ -1,0 +1,35 @@
+{
+  "name": "@d20dao/studio",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "fflate": "0.8.3",
+    "prismjs": "1.30.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@d20dao/vrf-sdk": "0.4.0",
+    "@openzeppelin/contracts": "5.6.1",
+    "@types/node": "^24.0.0",
+    "@types/prismjs": "1.26.6",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "ethers": "6.17.0",
+    "hardhat": "3.16.0",
+    "solc": "0.8.28",
+    "typescript": "7.0.2",
+    "vite": "8.3.0",
+    "vitest": "5.0.1"
+  }
+}
