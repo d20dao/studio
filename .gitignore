@@ -11,5 +11,8 @@ public/compiler/manifest.json
 test-results/
 coverage/
 artifacts/
+.wrangler/
+.dev.vars
+.dev.vars.*
 .DS_Store
 Thumbs.db

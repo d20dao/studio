@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "d20dao-studio",
+  "account_id": "accd2613dfd26b2eced55b6dc903aeb1",
+  "compatibility_date": "2026-09-22",
+  "send_metrics": false,
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "studio.d20dao.org", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "none"
+  }
+}

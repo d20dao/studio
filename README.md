@@ -2,9 +2,9 @@
 
 Product specification and implementation brief
 
-- **Proposed domain:** `studio.d20dao.org`
+- **Production domain:** [studio.d20dao.org](https://studio.d20dao.org)
 - **Created:** September 22, 2026
-- **Status:** Studio v0.3 demo / beta, including local project configuration, metadata previews and NFT boilerplate generation. Do not use exported code as-is: have your agent customize it, then review and test the result before deployment. The product specification below also includes later capabilities.
+- **Status:** Studio v0.3.1 demo / beta, including local project configuration, metadata previews and NFT boilerplate generation. Do not use exported code as-is: have your agent customize it, then review and test the result before deployment. The product specification below also includes later capabilities.
 - **Primary audience:** Game developers and NFT project teams.
 - **Primary objective:** Help independent projects adopt D20DAO by turning their game or NFT mechanic into a practical integration starter.
 - **Interface studies:** [ImageGen concepts and design references](design/README.md), prepared with the requested Astra medium agent. These are visual studies, not an implemented Studio application.
@@ -17,6 +17,8 @@ npm run dev
 ```
 
 Open `http://127.0.0.1:5178`. See [DEVELOPMENT.md](DEVELOPMENT.md) for architecture, checks, and build commands.
+
+Generated `AGENTS.md`, `AGENT_PROMPT.md` and README files include direct D20DAO documentation links, the selected Arc network's deployment manifest, and paths to the pinned SDK's own agent/API/provenance documents. Public web references can change; the installed SDK version remains the source for exact API behavior.
 
 The current React/TypeScript/Vite application implements:
 

@@ -81,4 +81,19 @@ Delete, workspace recovery and item-import review use the shared native `Modal`,
 3. Validate an exported integration in an independent game or NFT repository.
 4. Review broader inventories, partial-supply reveals and additional metadata/media formats before expanding support.
 
-Hosting and wallet-based deployment are separate future tasks.
+## Website deployment
+
+The production target is `https://studio.d20dao.org`. `wrangler.jsonc` deploys the Vite `dist/` output as a separate assets-only Cloudflare Worker named `d20dao-studio` in the domain's existing Cloudflare account. It does not change the main D20DAO website, add a backend, or deploy NFT contracts.
+
+```sh
+npm ci
+npm run check
+npm run deploy:check
+npm run deploy
+```
+
+`deploy:check` builds and performs a local Wrangler dry run. `deploy` builds again before publishing. Wrangler uses the operator's existing authenticated session; credentials, `.dev.vars` and `.wrangler` state must remain outside Git. The custom-domain route lets Cloudflare provision DNS and TLS. Workers.dev and preview URLs are disabled.
+
+Studio uses hash routes, so only `/` serves the app entry point. Missing asset paths return 404 rather than HTML, including missing compiler files. Compiler URLs revalidate their cache; the compiler manifest still checks the pinned asset hashes. The 0.8.28 compiler is unchanged; the Node-only `solc` dependency's temporary-file helper is overridden to patched `tmp` 0.2.7 in Studio and exported package declarations.
+
+Browser drafts are scoped to their origin. To move a localhost draft to the hosted Studio, download its project JSON locally and import it on the production domain. Wallet-based contract deployment remains a separate future task.
