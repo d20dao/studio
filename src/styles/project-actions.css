@@ -1,0 +1,16 @@
+.project-heading{position:sticky;top:0;z-index:2;background:#000;padding:14px 0;border-bottom:1px solid var(--line);align-items:center;gap:18px}
+.project-title{min-width:0;flex:1}.project-title .save-state{display:block;text-align:left;max-width:none;margin-top:8px}
+.project-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;max-width:100%}
+.issues-trigger{display:flex;align-items:center;justify-content:center;gap:9px;min-width:132px;font-size:12px}
+.issues-trigger>span:first-child{display:inline-flex;align-items:center;justify-content:center;border:1px solid currentColor;width:18px;height:18px;border-radius:50%;font-weight:bold;flex-shrink:0}
+.issues-trigger.has-errors{color:#ff9bb4;border-color:#a63652;background:#220810}.issues-trigger.has-notes{color:var(--yellow)}
+.export-trigger{font-size:12px;min-width:135px}
+.project-issues{padding:0;list-style:none;margin:0}.project-issues>li{border-top:1px solid var(--line)}
+.issue-entry{width:100%;text-align:left;border:0;background:transparent;padding:13px 4px;display:flex;flex-direction:column;gap:5px;border-radius:0;font:13px/1.6 Arial,sans-serif}
+.issue-entry:hover{background:#1a1a1a}.issue-label{display:flex;align-items:baseline;justify-content:space-between;gap:12px;width:100%;font:13px/1.5 var(--mono)}
+.issue-kind{font-size:11px;flex-shrink:0}.is-error .issue-kind{color:#ff9bb4}.is-note .issue-kind{color:var(--yellow)}
+.issue-entry>span:last-child{color:#bbb}.generation-issue{padding:14px 0 0}
+.export-next-steps{padding-left:22px;margin:14px 0}.export-next-steps li{margin-bottom:10px}
+[data-issue-focus=true]{outline:2px solid var(--yellow)!important;outline-offset:4px;scroll-margin-block:160px 100px}
+@media(max-width:1000px){.project-heading{flex-wrap:wrap}.project-title{flex-basis:100%}.project-actions{justify-content:flex-start}}
+@media(max-width:760px){.project-heading{display:flex;gap:14px;padding:12px 0}.project-heading h1{font-size:28px}.project-actions{width:100%;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.project-actions>button{width:100%;min-width:0;padding:10px 8px}.project-title .save-state{margin-top:6px}[data-issue-focus=true]{scroll-margin-block:200px 100px}}
