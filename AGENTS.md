@@ -23,6 +23,17 @@ Studio is a local-first developer tool for configuring D20DAO game and NFT integ
 - New NFT collections require metadata references before generation because their URI configuration has no setter. Keep generic item import usable for incomplete drafts and existing-contract integrations; validate readiness on the destination project.
 - Loot opening has no separate lifetime request quota. Supply includes premint, minted units and outstanding reservations. Recipient recovery may change only the delivery address, by the original requester after acceptance and before delivery; it must never change the word, token, action or protocol refund recipient.
 
+## D20DAO integration references
+
+Use the installed, pinned `@d20dao/vrf-sdk` as the primary source for exact interfaces and behavior: `node_modules/@d20dao/vrf-sdk/AGENTS.md`, `node_modules/@d20dao/vrf-sdk/API.md`, and `node_modules/@d20dao/vrf-sdk/PROTOCOL-PROVENANCE.json`. Online guides and repository main branches are discovery references; report discrepancies rather than silently changing the pinned SDK or template.
+
+- [Documentation](https://d20dao.org/docs), [getting started](https://d20dao.org/docs/getting-started), and [consumer integration](https://d20dao.org/docs/integration).
+- [Request lifecycle and refunds](https://d20dao.org/docs/service-rules), [verification](https://d20dao.org/docs/verification), [guide index](https://d20dao.org/llms.txt), and [agent guide](https://d20dao.org/agents.md).
+- [SDK source and README](https://github.com/d20dao/d20-sdk) and [integration skills](https://github.com/d20dao/skills).
+- Select only the configured network's deployment: [Arc Testnet, chain 5042002](https://d20dao.org/deployments/arc-testnet.json) or [Arc Mainnet, chain 5042](https://d20dao.org/deployments/arc-mainnet.json). Verify the chain, coordinator proxy, active implementation and configuration. A reachable manifest does not prove service availability, an audit or approval.
+
+Generated AGENTS.md, AGENT_PROMPT.md and README.md must carry these public references, exact installed SDK paths and the selected network's manifest; never silently default to another chain. Resource availability does not authorize a funded transaction.
+
 ## Implementation rules
 
 - Use Context7 for current library and API details. Keep private project data out of documentation queries.

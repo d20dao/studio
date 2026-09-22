@@ -4,8 +4,36 @@ import { effectiveTokenId, nftFiles } from '../templates/nft';
 
 const SDK_VERSION = '0.4.0';
 const SOLC_VERSION = '0.8.28';
-const TEMPLATE_VERSION = '0.3.0';
+const TEMPLATE_VERSION = '0.3.1';
 const OPENZEPPELIN_VERSION = '5.6.1';
+
+const DEPLOYMENT_REFERENCES = {
+  'arc-testnet': { name: 'Arc Testnet', chainId: 5042002, url: 'https://d20dao.org/deployments/arc-testnet.json' },
+  'arc-mainnet': { name: 'Arc Mainnet', chainId: 5042, url: 'https://d20dao.org/deployments/arc-mainnet.json' },
+} as const;
+
+function integrationReferences(project: StudioProject): string {
+  const deployment = Object.hasOwn(DEPLOYMENT_REFERENCES, project.network) ? DEPLOYMENT_REFERENCES[project.network] : undefined;
+  return `## Authoritative D20DAO references
+
+For exact API signatures and behavior, prioritize the installed @d20dao/vrf-sdk ${SDK_VERSION} package after installing this export's pinned dependencies. Paths below are relative to your project root:
+
+- [Pinned SDK agent guide](node_modules/@d20dao/vrf-sdk/AGENTS.md).
+- [Pinned SDK API reference](node_modules/@d20dao/vrf-sdk/API.md).
+- [Pinned protocol provenance](node_modules/@d20dao/vrf-sdk/PROTOCOL-PROVENANCE.json).
+
+Use these public resources for integration guidance and discovery:
+
+- [D20DAO documentation](https://d20dao.org/docs), [getting started](https://d20dao.org/docs/getting-started), and [consumer integration](https://d20dao.org/docs/integration).
+- [Request lifecycle and refunds](https://d20dao.org/docs/service-rules) and [independent verification](https://d20dao.org/docs/verification).
+- [Guide index for agents](https://d20dao.org/llms.txt) and [D20DAO agent guide](https://d20dao.org/agents.md).
+- [SDK source and README](https://github.com/d20dao/d20-sdk) and [integration skills](https://github.com/d20dao/skills).
+
+${deployment ? `Selected network: **${deployment.name} (chain ID ${deployment.chainId})**. Use its [deployment manifest](${deployment.url}); do not substitute a different network's manifest.` : 'No deployment manifest selected: resolve the unsupported project network before integration.'}
+
+Online guides and repository main branches can change. Keep the pinned SDK as the API reference, report mismatches, and make upgrades deliberately. Verify the intended chain, coordinator proxy, active implementation and configuration before use. A reachable manifest is deployment reference data, not proof of current service availability, an audit or approval. Reading these resources does not authorize funded transactions.
+`;
+}
 
 function ordered(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(ordered);
@@ -256,10 +284,13 @@ export async function generateProject(project: StudioProject): Promise<Generated
       : 'RNG consumer adapter generated. Existing collection interfaces, game authorization, asset delivery, optional modules, and configured application payments remain integration work. No compile, test, audit, or deployment is claimed by generation.'
     : 'Planning export only. Validation errors must be resolved before Solidity is generated. Nothing in this bundle is presented as a deployable application.';
   const notes = integrationNotes(project);
+  const references = integrationReferences(project);
   const context = fencedJson(project);
   const instructions = `# D20DAO Studio integration instructions
 
 ${readiness}
+
+${references}
 
 Use @d20dao/vrf-sdk ${SDK_VERSION}, ${isNew ? `@openzeppelin/contracts ${OPENZEPPELIN_VERSION}, ` : ''}Solidity ${SOLC_VERSION}, and EVM target cancun. Read the installed SDK's AGENTS.md, API.md, ABIs, examples, and PROTOCOL-PROVENANCE.json first. Match the selected network's reviewed deployment manifest.
 
@@ -286,12 +317,14 @@ ${context}
   const files: GeneratedFile[] = [
     { path: 'studio.project.json', content: json(project), language: 'json' },
     { path: 'config/items.json', content: json({ schemaVersion: 1, mechanic: project.mechanic, items: project.loot.items, ...(kind === 'starter' && project.mechanic === 'lootbox' ? { effectiveTokenIds: project.loot.items.map(effectiveTokenId) } : {}) }), language: 'json' },
-    { path: 'package.json', content: json({ name: 'd20dao-studio-export', version: '0.1.0', private: true, type: 'module', dependencies: { '@d20dao/vrf-sdk': SDK_VERSION, ...(isNew ? { '@openzeppelin/contracts': OPENZEPPELIN_VERSION } : {}) }, devDependencies: { solc: SOLC_VERSION } }), language: 'json' },
+    { path: 'package.json', content: json({ name: 'd20dao-studio-export', version: '0.1.0', private: true, type: 'module', dependencies: { '@d20dao/vrf-sdk': SDK_VERSION, ...(isNew ? { '@openzeppelin/contracts': OPENZEPPELIN_VERSION } : {}) }, devDependencies: { solc: SOLC_VERSION }, overrides: { solc: { tmp: '0.2.7' } } }), language: 'json' },
     { path: 'README.md', language: 'markdown', content: `# D20DAO integration starter
 
 ${readiness}
 
 Generator-bound configuration SHA-256: ${fingerprint}. Hash the object { generatorVersion: "${TEMPLATE_VERSION}", project: configuration }, using recursively sorted object keys, preserved array order, and compact JSON. The project configuration excludes createdAt/updatedAt. It identifies this configuration and generator release; it is not a proof of asset hosting or collection immutability.
+
+${references}
 
 ## Files
 

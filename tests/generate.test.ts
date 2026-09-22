@@ -47,7 +47,7 @@ describe('project generation', () => {
     const changed = await generateProject({ ...input, name: 'Different collection' });
     expect(changed.fingerprint).not.toBe(first.fingerprint);
     const manifest = JSON.parse(first.files.find((file) => file.path === 'GENERATION-MANIFEST.json')!.content);
-    expect(manifest.versions).toMatchObject({ generator: '0.3.0', sdk: '0.4.0', solc: '0.8.28', evmVersion: 'cancun' });
+    expect(manifest.versions).toMatchObject({ generator: '0.3.1', sdk: '0.4.0', solc: '0.8.28', evmVersion: 'cancun' });
     expect(manifest.checks.solidityCompilation).toBe('not-run-by-generator');
   });
 
@@ -70,6 +70,53 @@ describe('project generation', () => {
     expect(byPath['README.md']).toContain('not an authorization restriction');
     expect(byPath['AGENT_PROMPT.md']).toContain('"price": "2.5"');
     expect(byPath['AGENT_PROMPT.md']).toContain('"includeInReveal": false');
+  });
+
+  it.each([
+    ['new', 'arc-testnet', 'Arc Testnet', 5042002],
+    ['new', 'arc-mainnet', 'Arc Mainnet', 5042],
+    ['existing', 'arc-testnet', 'Arc Testnet', 5042002],
+    ['existing', 'arc-mainnet', 'Arc Mainnet', 5042],
+  ] as const)('exports explicit pinned and public references for %s on %s', async (integration, network, name, chainId) => {
+    const bundle = await generateProject(project({ integration, network }));
+    expect(bundle.kind).toBe('starter');
+    const opposite = network === 'arc-mainnet' ? 'arc-testnet' : 'arc-mainnet';
+    for (const path of ['AGENTS.md', 'AGENT_PROMPT.md', 'README.md']) {
+      const text = bundle.files.find(file => file.path === path)!.content;
+      expect(text, path).toContain(`Selected network: **${name} (chain ID ${chainId})**`);
+      expect(text, path).toContain(`https://d20dao.org/deployments/${network}.json`);
+      expect(text, path).not.toContain(`https://d20dao.org/deployments/${opposite}.json`);
+      for (const local of ['AGENTS.md', 'API.md', 'PROTOCOL-PROVENANCE.json']) {
+        expect(text, path).toContain(`node_modules/@d20dao/vrf-sdk/${local}`);
+      }
+      for (const url of [
+        'https://d20dao.org/docs/getting-started', 'https://d20dao.org/docs/integration',
+        'https://d20dao.org/docs/service-rules', 'https://d20dao.org/docs/verification',
+        'https://d20dao.org/llms.txt', 'https://d20dao.org/agents.md',
+        'https://github.com/d20dao/d20-sdk', 'https://github.com/d20dao/skills',
+      ]) expect(text, path).toContain(url);
+      expect(text, path).toContain('prioritize the installed @d20dao/vrf-sdk 0.4.0');
+      expect(text, path).toContain('not proof of current service availability');
+    }
+  });
+
+  it('does not fall back to a deployment network for unsupported runtime input', async () => {
+    const invalid = project({ network: 'unknown-chain' as StudioProject['network'] });
+    const bundle = await generateProject(invalid);
+    expect(bundle.kind).toBe('plan');
+    for (const path of ['AGENTS.md', 'AGENT_PROMPT.md', 'README.md']) {
+      const text = bundle.files.find(file => file.path === path)!.content;
+      expect(text).toContain('No deployment manifest selected');
+      expect(text).not.toContain('https://d20dao.org/deployments/arc-');
+    }
+  });
+
+  it.each(['new', 'existing'] as const)('exports %s compiler dependencies with the patched temporary-file helper', async integration => {
+    const bundle = await generateProject(project({ integration }));
+    const packageJson = JSON.parse(bundle.files.find(file => file.path === 'package.json')!.content);
+    expect(packageJson.dependencies['@d20dao/vrf-sdk']).toBe('0.4.0');
+    expect(packageJson.devDependencies.solc).toBe('0.8.28');
+    expect(packageJson.overrides).toEqual({ solc: { tmp: '0.2.7' } });
   });
 
   it('treats adversarial labels as data and never as paths or Solidity', async () => {
