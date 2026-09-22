@@ -4,7 +4,7 @@ Product specification and implementation brief
 
 - **Production domain:** [studio.d20dao.org](https://studio.d20dao.org)
 - **Created:** September 22, 2026
-- **Status:** Studio v0.3.1 demo / beta, including local project configuration, metadata previews and NFT boilerplate generation. Do not use exported code as-is: have your agent customize it, then review and test the result before deployment. The product specification below also includes later capabilities.
+- **Status:** Studio v0.4.0 demo / beta, including local project configuration, metadata previews and NFT boilerplate generation. Do not use exported code as-is: have your agent customize it, then review and test the result before deployment. The product specification below also includes later capabilities.
 - **Primary audience:** Game developers and NFT project teams.
 - **Primary objective:** Help independent projects adopt D20DAO by turning their game or NFT mechanic into a practical integration starter.
 - **Interface studies:** [ImageGen concepts and design references](design/README.md), prepared with the requested Astra medium agent. These are visual studies, not an implemented Studio application.
@@ -23,7 +23,7 @@ Generated `AGENTS.md`, `AGENT_PROMPT.md` and README files include direct D20DAO 
 The current React/TypeScript/Vite application implements:
 
 - Local projects with duplicate/delete/undo, JSON import/export, hash navigation, remembered views, conflict-aware saves, and explicit recovery of malformed storage.
-- Lootbox/reveal configuration, weighted probability summaries, optional token IDs, premint/royalty settings, and payment/recovery choices.
+- Lootbox/reveal configuration, unlimited or explicitly capped supply, shuffle/offset/per-token-hash reveal modes, weighted probability summaries, optional token IDs, premint/royalty settings, and payment/recovery choices.
 - Metadata thumbnails and accessible NFT cards, bounded HTTPS/IPFS/Arweave loading, local JSON fallback, and previewed JSON/CSV item import.
 - A file browser with syntax highlighting, line numbers, compiler diagnostic navigation, ZIP export, and project-specific agent instructions.
 - New-project ERC-1155 loot or ERC-721 reveal collections with configured premint, ERC-2981 royalty signaling, supply limits, and authenticated VRF consumers. Existing-project exports remain adapters and instructions. Invalid configuration produces a planning bundle without Solidity.
@@ -305,9 +305,17 @@ The reveal workflow should generate the integration for a compatible collection 
 
 ### Collection size and truthful scope
 
-At the planning baseline, the SDK's built-in `chooseOne`, `chooseMany`, and `shuffle` population limit is 256. The first reveal example should stay within the supported size; 64 or 128 items is a practical demonstration scope.
+Collection supply defaults to unlimited. A developer can set an explicit finite cap; there is no 128-token default or 256-token collection limit. Existing project caps are preserved when importing earlier schemas.
 
-A large collection needs a separately reviewed assignment design. One raw VRF word can seed an application-defined deterministic off-chain assignment algorithm, but this does not extend the built-in shuffle limit or automatically provide onchain enforcement of that assignment.
+Each new-collection reveal freezes an already-minted range. Minting can continue while that range is pending; an expired retry keeps the same range. The selected mode changes both generated contracts and agent instructions:
+
+| Mode | VRF operation | Result |
+| --- | --- | --- |
+| Shuffle | SDK shuffle, up to 256 per request | A permutation within each frozen batch; larger collections continue with later batches. |
+| Index offset | NumberRange from 0 to batch count minus one | An unbiased cyclic offset over all currently unrevealed minted tokens; a rotation, not a full shuffle. |
+| Per-token hash | Raw VRF word | A domain-separated hash/seed per token. Traits and seed-driven rendering/publication remain explicit customization work. |
+
+Offset and hash modes store finalized ranges without looping over all participating tokens. Their getters find the correct batch by binary search. The hash mode retains indexed metadata URIs; it does not automatically transform prewritten metadata into randomized traits. ERC-721 premint allocation is distributed with `mintPremint` in gas-appropriate transactions rather than a constructor loop.
 
 A publisher-provided Merkle root proves membership in its committed output, not by itself that the output was correctly derived from the VRF word. The generated documentation must explain the verification boundary of the selected design.
 

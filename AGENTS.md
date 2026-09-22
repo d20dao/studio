@@ -22,6 +22,8 @@ Studio is a local-first developer tool for configuring D20DAO game and NFT integ
 - RNG fees, overpayment credits, application prices, and NFT/material custody are separate accounting domains.
 - New NFT collections require metadata references before generation because their URI configuration has no setter. Keep generic item import usable for incomplete drafts and existing-contract integrations; validate readiness on the destination project.
 - Loot opening has no separate lifetime request quota. Supply includes premint, minted units and outstanding reservations. Recipient recovery may change only the delivery address, by the original requester after acceptance and before delivery; it must never change the word, token, action or protocol refund recipient.
+- Supply is unlimited unless the developer explicitly sets a cap. Do not turn a per-request SDK mapping bound into a collection limit. Reveal mode changes both Solidity and agent instructions: shuffle is batch-local, offset is a cyclic rotation, and per-token hash is a seed hook requiring traits/rendering customization.
+- Freeze each reveal batch before requesting; preserve its range through expired retries even when more tokens mint. Never reroll accepted batches. Stage ERC-721 premint in transactions, preserve excluded-prefix metadata, and guard batch locking against receiver-hook reentrancy.
 
 ## D20DAO integration references
 
