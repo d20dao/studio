@@ -107,7 +107,7 @@ self.onmessage = async (event) => {
     version = module.cwrap('solidity_version', 'string', [])();
     if (version !== manifest.compilerVersion) throw new Error('Loaded Solidity version differs from the prepared manifest.');
     const sources = { ...dependencies, ...requested };
-    const outputSelection = Object.fromEntries(names.map((name) => [name, { '*': ['abi', 'evm.bytecode.object'] }]));
+    const outputSelection = Object.fromEntries(names.map((name) => [name, { '*': ['abi', 'evm.bytecode.object', 'evm.deployedBytecode.object'] }]));
     const input = {
       language: 'Solidity',
       sources,
@@ -122,7 +122,7 @@ self.onmessage = async (event) => {
     if (succeeded) {
       for (const source of names.sort()) {
         for (const [name, contract] of Object.entries(output.contracts?.[source] || {}).sort(([a], [b]) => a.localeCompare(b))) {
-          contracts.push({ source, name, abi: contract.abi || [], bytecode: contract.evm?.bytecode?.object || '' });
+          contracts.push({ source, name, abi: contract.abi || [], bytecode: contract.evm?.bytecode?.object || '', deployedBytecode: contract.evm?.deployedBytecode?.object || '' });
         }
       }
     }

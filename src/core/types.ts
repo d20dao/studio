@@ -6,7 +6,7 @@ export type RevealMode = 'shuffle' | 'offset' | 'token-hash';
 
 export interface LootItem {
   id: string;
-  /** Explicit NFT token identifier. Omission preserves the legacy row-index mapping. */
+  /** Explicit NFT token identifier. Omission uses the zero-based row index. */
   tokenId?: string;
   name: string;
   metadataUri: string;
@@ -14,7 +14,7 @@ export interface LootItem {
 }
 
 export interface StudioProject {
-  schemaVersion: 3;
+  schemaVersion: 4;
   id: string;
   name: string;
   mechanic: Mechanic;
@@ -32,7 +32,11 @@ export interface StudioProject {
     metadataBaseUri: string;
   };
   loot: { items: LootItem[] };
-  reveal: { mode: RevealMode };
+  reveal: {
+    mode: RevealMode;
+    /** Placeholder metadata for minted, unrevealed tokens. Empty returns an empty tokenURI. */
+    unrevealedUri: string;
+  };
   modules: {
     premint: { enabled: boolean; quantity: number; recipient: string; includeInReveal: boolean };
     royalty: { enabled: boolean; bps: number; recipient: string };

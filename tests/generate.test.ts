@@ -7,14 +7,14 @@ import type { StudioProject } from '../src/core/types';
 
 function project(overrides: Partial<StudioProject> = {}): StudioProject {
   return {
-    schemaVersion: 3, id: 'studio-test-project', name: 'Ancient Chest', mechanic: 'lootbox', integration: 'new', network: 'arc-testnet',
+    schemaVersion: 4, id: 'studio-test-project', name: 'Ancient Chest', mechanic: 'lootbox', integration: 'new', network: 'arc-testnet',
     createdAt: '2026-09-22T00:00:00.000Z', updatedAt: '2026-09-22T00:00:00.000Z', isExample: false,
     collection: { name: 'Ancient Collection', symbol: 'AC', standard: 'erc1155', maxSupply: 64, metadataBaseUri: 'ipfs://collection/' },
     loot: { items: [
       { id: 'common', name: 'Common', metadataUri: 'ipfs://common', weight: 600 },
       { id: 'rare', name: 'Rare', metadataUri: 'ipfs://rare', weight: 400 },
     ] },
-    reveal: { mode: 'shuffle' },
+    reveal: { mode: 'shuffle', unrevealedUri: '' },
     modules: { premint: { enabled: false, quantity: 0, recipient: '', includeInReveal: true }, royalty: { enabled: false, bps: 0, recipient: '' } },
     payment: { price: '0', rngPayer: 'user', refundRecipient: 'payer', refundAddress: '', recovery: 'both', applicationRefund: 'refund-on-expiry' },
     ...overrides,
@@ -25,7 +25,7 @@ describe('project generation', () => {
   it.each(['new', 'existing'] as const)('changes %s source and agent instructions for each reveal mode', async integration => {
     const fingerprints = new Set<string>();
     for (const mode of ['shuffle', 'offset', 'token-hash'] as const) {
-      const input = project({ mechanic: 'reveal', integration, reveal: { mode } });
+      const input = project({ mechanic: 'reveal', integration, reveal: { mode, unrevealedUri: '' } });
       input.collection.standard = 'erc721';
       input.collection.maxSupply = null;
       const bundle = await generateProject(input);
@@ -83,7 +83,7 @@ describe('project generation', () => {
     const changed = await generateProject({ ...input, name: 'Different collection' });
     expect(changed.fingerprint).not.toBe(first.fingerprint);
     const manifest = JSON.parse(first.files.find((file) => file.path === 'GENERATION-MANIFEST.json')!.content);
-    expect(manifest.versions).toMatchObject({ generator: '0.4.0', sdk: '0.4.0', solc: '0.8.28', evmVersion: 'cancun' });
+    expect(manifest.versions).toMatchObject({ generator: '0.5.0', sdk: '0.4.0', solc: '0.8.28', evmVersion: 'cancun' });
     expect(manifest.checks.solidityCompilation).toBe('not-run-by-generator');
   });
 
@@ -229,10 +229,15 @@ describe('project generation', () => {
     ['reveal', 'new', 'shuffle'], ['reveal', 'new', 'offset'], ['reveal', 'new', 'token-hash'],
     ['reveal', 'existing', 'shuffle'], ['reveal', 'existing', 'offset'], ['reveal', 'existing', 'token-hash'],
   ] as const)('compiles %s / %s / %s against the pinned SDK', async (mechanic, integration, mode) => {
-    const input = project({ mechanic, integration, reveal: { mode } });
+    const input = project({ mechanic, integration, reveal: { mode, unrevealedUri: 'ipfs://collection/unrevealed.json' } });
     input.collection.standard = mechanic === 'reveal' ? 'erc721' : 'erc1155';
     input.collection.maxSupply = null;
     const bundle = await generateProject(input);
+    const paths = bundle.files.map(file => file.path);
+    expect(new Set(paths).size).toBe(paths.length);
+    expect(paths.filter(path => path.endsWith('.sol'))).toEqual(integration === 'new'
+      ? [`contracts/${mechanic === 'reveal' ? 'D20RevealCollection' : 'D20LootCollection'}.sol`, `contracts/${mechanic === 'reveal' ? 'D20RevealStarter' : 'D20LootStarter'}.sol`]
+      : [`contracts/${mechanic === 'reveal' ? 'D20RevealStarter' : 'D20LootStarter'}.sol`]);
     const sources = Object.fromEntries(bundle.files.filter((file) => file.language === 'solidity').map((file) => [file.path, { content: file.content }]));
     const allowedImport = (path: string) => /^(?:@d20dao\/vrf-sdk\/contracts\/|@openzeppelin\/contracts\/)[A-Za-z0-9_./-]+\.sol$/.test(path) && !path.split('/').includes('..');
     const solc = createRequire(import.meta.url)('solc') as {
@@ -249,5 +254,103 @@ describe('project generation', () => {
     expect((compiled.errors ?? []).filter((error: { severity: string }) => error.severity === 'error')).toEqual([]);
     const className = mechanic === 'reveal' ? 'D20RevealStarter' : 'D20LootStarter';
     expect(compiled.contracts[`contracts/${className}.sol`][className].evm.bytecode.object.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['lootbox', 'new', 'arc-testnet'], ['lootbox', 'existing', 'arc-mainnet'], ['reveal', 'new', 'arc-mainnet'], ['reveal', 'existing', 'arc-testnet'],
+  ] as const)('tells the %s / %s agent how clients quote, wait and recover on %s', async (mechanic, integration, network) => {
+    const input = project({ mechanic, integration, network });
+    input.collection.standard = mechanic === 'reveal' ? 'erc721' : 'erc1155';
+    const bundle = await generateProject(input);
+    expect(bundle.kind).toBe('starter');
+    const hex = network === 'arc-mainnet' ? '0x13b2' : '0x4cef52';
+    const otherHex = network === 'arc-mainnet' ? '0x4cef52' : '0x13b2';
+    for (const path of ['AGENTS.md', 'AGENT_PROMPT.md', 'README.md']) {
+      const text = bundle.files.find(file => file.path === path)!.content;
+      for (const term of [
+        'quoteRequestFee(provider, coordinatorAddress, CALLBACK_GAS)', 'quoteFeeAt(CALLBACK_GAS, latestBlock.baseFeePerGas)', 'Never quote with quoteFee through eth_call',
+        'withdrawRefundCredit(recipient)', 'refundCredits(address)', 'getRequest(requestId)', 'refundRequest(requestId)', 'at least 400,000',
+        'retryCallback(requestId, gasLimit)', 'gasLimit + 250,000', 'retryRefundCallback(requestId, gasLimit)', 'gasLimit + 150,000',
+        'coordinatorAbi from @d20dao/vrf-sdk/abi', 'batchMaxCount: 1', mechanic === 'lootbox' ? 'OpeningRequested' : 'RevealRequested',
+      ]) expect(text, `${path}: ${term}`).toContain(term);
+      expect(text).toContain(`(${hex})`);
+      expect(text).not.toContain(`(${otherHex})`);
+      expect(text.includes('## Deployment sequence')).toBe(integration === 'new');
+    }
+  });
+
+  it('exports a Foundry configuration only for new collection pairs', async () => {
+    const created = await generateProject(project());
+    const foundry = created.files.find(file => file.path === 'foundry.toml')!.content;
+    expect(foundry).toContain('solc_version = "0.8.28"');
+    expect(foundry).toContain('evm_version = "cancun"');
+    expect(foundry).toContain('optimizer_runs = 200');
+    expect(foundry).toContain('"@d20dao/vrf-sdk/=node_modules/@d20dao/vrf-sdk/"');
+    expect(foundry).toContain('"@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/"');
+    expect(JSON.parse(created.files.find(file => file.path === 'GENERATION-MANIFEST.json')!.content).files).toContain('foundry.toml');
+    expect((await generateProject(project({ integration: 'existing' }))).files.some(file => file.path === 'foundry.toml')).toBe(false);
+    const invalid = project(); invalid.loot.items = [];
+    expect((await generateProject(invalid)).files.some(file => file.path === 'foundry.toml')).toBe(false);
+  });
+
+  it.each(['new', 'existing'] as const)('gives %s loot a packed weight table and the _authorizeOpen entitlement hook', async integration => {
+    const input = project({ integration });
+    input.loot.items = [
+      { id: 'a', name: 'A', metadataUri: 'ipfs://a', weight: 3, tokenId: '7' },
+      { id: 'b', name: 'B', metadataUri: 'ipfs://b', weight: 0 },
+      { id: 'c', name: 'C', metadataUri: 'ipfs://c', weight: 5 },
+    ];
+    const bundle = await generateProject(input);
+    const source = bundle.files.find(file => file.path === 'contracts/D20LootStarter.sol')!.content;
+    expect(source).toContain('bytes private constant CUMULATIVE_WEIGHTS = hex"000000030000000300000008";');
+    expect(source.includes('bytes private constant TOKEN_IDS')).toBe(integration === 'new');
+    if (integration === 'new') expect(source).toContain(`${'0'.repeat(63)}7${'0'.repeat(63)}1${'0'.repeat(63)}2`);
+    expect(source).not.toMatch(/uint256\[\d+\] private/);
+    expect(source).toContain('function _authorizeOpen(');
+    expect(source).toMatch(/_authorizeOpen\(msg\.sender, actionId/);
+    expect(bundle.files.find(file => file.path === 'AGENTS.md')!.content).toContain('Enforce game entitlement, eligibility or an application price in _authorizeOpen');
+  });
+
+  it('stores small loot tables at deployment and exports proofs for the rest of a large table', async () => {
+    const small = await generateProject(project());
+    const smallRegistration = JSON.parse(small.files.find(file => file.path === 'config/item-registration.json')!.content);
+    expect(smallRegistration).toMatchObject({ itemCount: 2, storedAtDeployment: 2, pending: [], treeDepth: 1 });
+    expect(small.files.find(file => file.path === 'contracts/D20LootCollection.sol')!.content).toContain(`bytes32 public constant ITEMS_ROOT = ${smallRegistration.itemsRoot};`);
+    expect(small.files.find(file => file.path === 'AGENTS.md')!.content).toContain('No registration transaction is needed.');
+
+    const input = project();
+    input.collection.maxSupply = null;
+    input.loot.items = Array.from({ length: 256 }, (_, index) => ({ id: `item-${index}`, name: `Item ${index}`, metadataUri: `ipfs://bafy-metadata-reference-${index}/item.json`.padEnd(73, 'x'), weight: 1 }));
+    const large = await generateProject(input);
+    const registration = JSON.parse(large.files.find(file => file.path === 'config/item-registration.json')!.content);
+    expect(registration.itemCount).toBe(256);
+    expect(registration.treeDepth).toBe(8);
+    expect(registration.storedAtDeployment).toBeGreaterThan(1);
+    expect(registration.storedAtDeployment).toBeLessThan(256);
+    expect(registration.pending).toHaveLength(256 - registration.storedAtDeployment);
+    expect(registration.pending[0]).toMatchObject({ index: registration.storedAtDeployment, tokenId: String(registration.storedAtDeployment), uri: input.loot.items[registration.storedAtDeployment].metadataUri });
+    expect(registration.pending[0].proof).toHaveLength(8);
+    const collection = large.files.find(file => file.path === 'contracts/D20LootCollection.sol')!.content;
+    expect(collection.match(/_registerItem\(\d+, /g)).toHaveLength(registration.storedAtDeployment);
+    const agents = large.files.find(file => file.path === 'AGENTS.md')!.content;
+    expect(agents).toContain(`Register items ${registration.storedAtDeployment} to 255`);
+    expect(JSON.parse(large.files.find(file => file.path === 'GENERATION-MANIFEST.json')!.content).integrationRequired).toContain(`register the ${256 - registration.storedAtDeployment} remaining committed items before opening`);
+    expect((await generateProject(project({ integration: 'existing' }))).files.some(file => file.path === 'config/item-registration.json')).toBe(false);
+  });
+
+  it('fixes a configured unrevealed placeholder and ERC-4906 refresh into a new reveal collection', async () => {
+    const input = project({ mechanic: 'reveal', reveal: { mode: 'offset', unrevealedUri: 'ipfs://collection/unrevealed.json' } });
+    input.collection.standard = 'erc721';
+    const bundle = await generateProject(input);
+    const collection = bundle.files.find(file => file.path === 'contracts/D20RevealCollection.sol')!.content;
+    expect(collection).toContain('import {IERC4906}');
+    expect(collection).toContain('emit BatchMetadataUpdate(start, start + count - 1);');
+    expect(collection).toContain('return unrevealedUri;');
+    const agents = bundle.files.find(file => file.path === 'AGENTS.md')!.content;
+    expect(agents).toContain('Unrevealed tokens return the fixed unrevealedUri placeholder');
+    expect(JSON.parse(bundle.files.find(file => file.path === 'GENERATION-MANIFEST.json')!.content).implementedFeatures).toEqual(expect.arrayContaining(['ERC-4906 metadata refresh on reveal', 'configured unrevealed placeholder metadata']));
+    input.reveal.unrevealedUri = '';
+    const empty = await generateProject(input);
+    expect(empty.files.find(file => file.path === 'AGENTS.md')!.content).toContain('No placeholder is configured, so unrevealed tokens return an empty tokenURI');
   });
 });

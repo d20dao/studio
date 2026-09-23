@@ -1,6 +1,6 @@
 import type { LootItem } from './types';
 import { normalizeTokenId } from './metadata';
-import { createProject, validateProject } from './project';
+import { createProject, METADATA_REFERENCE, validateProject } from './project';
 export type ItemImport = { items: LootItem[]; errors: string[] };
 const LIMIT = 256;
 function csvRows(text: string): string[][] {
@@ -47,7 +47,7 @@ export function parseItemsImport(text: string, format: 'json' | 'csv'): ItemImpo
         if (typeof row.name !== 'string' || !row.name.trim() || row.name.length > 80) throw new Error('name must contain 1–80 characters.');
         if (typeof row.metadataUri !== 'string' || row.metadataUri.length > 512) throw new Error('metadataUri must be text of at most 512 characters.');
         if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(row.name + row.metadataUri)) throw new Error('name and metadataUri must not contain unsupported control characters.');
-        if (row.metadataUri && !/^(https:\/\/|ipfs:\/\/|ar:\/\/)/i.test(row.metadataUri)) throw new Error('metadataUri must use an HTTPS, IPFS or Arweave prefix.');
+        if (row.metadataUri && !METADATA_REFERENCE.test(row.metadataUri)) throw new Error('metadataUri must start with lowercase https://, ipfs:// or ar://.');
         const weight = typeof row.weight === 'number' ? row.weight : typeof row.weight === 'string' && /^\d+$/.test(row.weight) ? Number(row.weight) : NaN;
         if (!Number.isSafeInteger(weight) || weight < 0 || weight > 1_000_000) throw new Error('weight must be a whole number between 0 and 1,000,000.');
         const tokenId = row.tokenId === '' || row.tokenId === undefined ? undefined : typeof row.tokenId === 'string' ? normalizeTokenId(row.tokenId) : (() => { throw new Error('tokenId must be a decimal string to preserve precision.'); })();

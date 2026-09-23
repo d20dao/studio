@@ -83,8 +83,10 @@ describe('validation issue navigation', () => {
       expect(issueTarget('reveal.mode', project)).toEqual({ page: 'mechanic', path: 'reveal.mode', label: 'Reveal mode' });
     }
     expect(issueTarget('reveal', project).path).toBe('reveal.mode');
+    expect(issueTarget('reveal.unrevealedUri', project)).toEqual({ page: 'mechanic', path: 'reveal.unrevealedUri', label: 'Unrevealed placeholder URI' });
     project.mechanic = 'lootbox';
     expect(issueTarget('reveal.mode', project)).toMatchObject({ page: 'overview', path: 'mechanic' });
+    expect(issueTarget('reveal.unrevealedUri', project)).toMatchObject({ page: 'overview', path: 'mechanic' });
   });
   it('routes an unlimited-supply issue to the policy and drops its stale numeric draft', () => {
     const project = createProject('Supply policy', 'reveal');

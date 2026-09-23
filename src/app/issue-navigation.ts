@@ -58,6 +58,7 @@ export function issueTarget(path: string, project: StudioProject): IssueTarget {
     'collection.metadataBaseUri': project.mechanic === 'reveal' ? target('mechanic', 'collection.metadataBaseUri', 'Metadata base URI') : mechanicChoice(),
     reveal: project.mechanic === 'reveal' ? target('mechanic', 'reveal.mode', 'Reveal mode') : mechanicChoice(),
     'reveal.mode': project.mechanic === 'reveal' ? target('mechanic', 'reveal.mode', 'Reveal mode') : mechanicChoice(),
+    'reveal.unrevealedUri': project.mechanic === 'reveal' ? target('mechanic', 'reveal.unrevealedUri', 'Unrevealed placeholder URI') : mechanicChoice(),
     'payment.price': target('payment', 'payment.price', 'Application price'),
     'payment.rngPayer': target('payment', 'payment.rngPayer', 'RNG fee payer'),
     'payment.refundRecipient': target('payment', 'payment.refundRecipient', 'Fixed refund recipient policy'),

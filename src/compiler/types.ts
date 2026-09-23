@@ -13,11 +13,15 @@ export interface CompiledContract {
   abi: unknown[];
   /** Solidity's hexadecimal creation bytecode, without a 0x prefix. */
   bytecode: string;
+  /** Hexadecimal runtime bytecode stored at the deployed address, without a 0x prefix. */
+  deployedBytecode: string;
 }
 
 export interface CompilationResult {
   compilerVersion: string;
   succeeded: boolean;
+  /** Compiled and within EVM contract-size limits. Deployment still needs review and a live network. */
+  deployable: boolean;
   durationMs: number;
   contracts: CompiledContract[];
   diagnostics: CompilerDiagnostic[];

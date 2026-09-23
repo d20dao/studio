@@ -1,4 +1,5 @@
 import type { GeneratedFile, LootItem, StudioProject } from '../core/types';
+import type { ItemCommitment } from '../core/item-commitment';
 
 /** Solidity UTF-8 bytes, without interpolating user text into source syntax. */
 function solidityString(value: string): string {
@@ -8,6 +9,62 @@ function solidityString(value: string): string {
 
 export function effectiveTokenId(item: LootItem, index: number): string {
   return BigInt(item.tokenId === undefined || item.tokenId === '' ? index : item.tokenId).toString();
+}
+
+// About 5.7M gas of constructor storage. Beyond it, initcode and deployment gas outgrow common limits
+// (EIP-3860 caps initcode at 49,152 bytes), so the remaining items register later with Merkle proofs.
+const CONSTRUCTOR_ITEM_SLOT_BUDGET = 256;
+
+/** Leading items whose URIs are stored at deployment. The premint item (row 0) always fits. */
+export function constructorItemCount(items: LootItem[]): number {
+  let slots = 0;
+  for (const [index, item] of items.entries()) {
+    const bytes = new TextEncoder().encode(item.metadataUri).length;
+    slots += 1 + (bytes < 32 ? 1 : 1 + Math.ceil(bytes / 32));
+    if (slots > CONSTRUCTOR_ITEM_SLOT_BUDGET) return Math.max(1, index);
+  }
+  return items.length;
+}
+
+function packed(values: bigint[], bytes: number): string {
+  return values.map(value => value.toString(16).padStart(bytes * 2, '0')).join('');
+}
+
+/** Weight tables live in code: no deployment storage writes and a logarithmic on-chain lookup. */
+export function weightTable(project: StudioProject, withTokenIds: boolean): { constants: string; lookup: string } {
+  let cumulative = 0n;
+  const totals = project.loot.items.map(item => (cumulative += BigInt(item.weight)));
+  if (cumulative <= 0n || cumulative > 0xffffffffn) throw new Error('Loot weights must total between 1 and 2^32 - 1.');
+  return {
+    constants: `    uint256 public constant ITEM_COUNT = ${totals.length};
+    uint256 public constant TOTAL_WEIGHT = ${cumulative};
+    /// Cumulative weights in configured item order, one big-endian uint32 each.
+    bytes private constant CUMULATIVE_WEIGHTS = hex"${packed(totals, 4)}";${withTokenIds ? `
+    /// Token IDs in configured item order, one big-endian uint256 each.
+    bytes private constant TOKEN_IDS = hex"${packed(project.loot.items.map((item, index) => BigInt(effectiveTokenId(item, index))), 32)}";` : ''}`,
+    lookup: `        uint256 draw = ID20VRF(vrfCoordinator).getMappedResult(requestId)[0];
+        bytes memory cumulative = CUMULATIVE_WEIGHTS;
+        // First item whose cumulative weight reaches the draw; zero-weight items are never selected.
+        uint256 high = ITEM_COUNT - 1;
+        while (index < high) {
+            uint256 middle = (index + high) / 2;
+            if (_packed(cumulative, middle, 4) < draw) index = middle + 1;
+            else high = middle;
+        }
+    }
+
+    function _packed(bytes memory table, uint256 index, uint256 width) private pure returns (uint256 value) {
+        for (uint256 offset = index * width; offset < (index + 1) * width; ++offset) value = (value << 8) | uint8(table[offset]);
+    }`,
+  };
+}
+
+/** Shared by new and existing loot consumers so every template exposes the same entitlement seam. */
+export function authorizeOpenHook(withRecipient: boolean): string {
+  return `    /// @dev Integration hook for game entitlement, eligibility or a sale price. As generated it admits every caller,
+    ///      so anyone can open by paying only the RNG fee. A sale price needs separate accounting: forward only the
+    ///      RNG fee to the coordinator and keep the requester as the protocol refund recipient.
+    function _authorizeOpen(address /* requester */, bytes32 /* actionId */${withRecipient ? ', address /* recipient */' : ''}) internal virtual {}`;
 }
 
 const header = `// SPDX-License-Identifier: MIT
@@ -55,38 +112,72 @@ function controller(): string {
 `;
 }
 
-function lootCollection(project: StudioProject, fingerprint: string): string {
+function lootCollection(project: StudioProject, fingerprint: string, items: ItemCommitment): string {
   const premint = project.modules.premint.enabled ? project.modules.premint.quantity : 0;
   const firstId = effectiveTokenId(project.loot.items[0], 0);
+  const stored = constructorItemCount(project.loot.items);
   return `${header}
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 ${ownableImports}
-/// @notice Fixed weighted reward item definitions; no public sale or arbitrary owner mint.
+/// @notice Weighted reward items committed at generation; no public sale or arbitrary owner mint.
 contract D20LootCollection is ERC1155, ERC2981, Ownable, ReentrancyGuard {
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
     bool public constant SUPPLY_CAPPED = ${project.collection.maxSupply !== null};
     uint256 public constant MAX_SUPPLY = ${project.collection.maxSupply ?? 0};
     uint256 public constant PREMINT_QUANTITY = ${premint};
+    /// @notice SHA-256 Merkle root over sha256(0x00, index, tokenId, sha256(uri)) for every configured item.
+    bytes32 public constant ITEMS_ROOT = ${items.root};
+    uint256 public constant ITEM_COUNT = ${project.loot.items.length};
+    uint256 private constant ITEM_TREE_DEPTH = ${items.depth};
     string public name;
     string public symbol;
+    uint256 public registeredItems;
     uint256 public mintedSupply;
     uint256 public reservedSupply;
     mapping(uint256 => bool) public knownItem;
     mapping(uint256 => string) private _itemUri;
     mapping(bytes32 => address) public reservedRecipient;
     mapping(bytes32 => bool) public completed;
+    struct ItemRegistration { uint256 index; uint256 tokenId; string uri; bytes32[] proof; }
     error SupplyUnavailable();
     error InvalidReservation();
     error UnknownItem();
+    error ItemsNotRegistered();
+    error InvalidItemProof();
 ${controller()}
     constructor(address initialOwner) ERC1155("") Ownable(initialOwner) {
         name = ${solidityString(project.collection.name)};
         symbol = ${solidityString(project.collection.symbol)};
-${project.loot.items.map((item, index) => `        knownItem[${effectiveTokenId(item, index)}] = true;
-        _itemUri[${effectiveTokenId(item, index)}] = ${solidityString(item.metadataUri)};`).join('\n')}
+${stored < project.loot.items.length ? `        // Items ${stored} to ${project.loot.items.length - 1} register after deployment from config/item-registration.json.\n` : ''}${project.loot.items.slice(0, stored).map((item, index) => `        _registerItem(${effectiveTokenId(item, index)}, ${solidityString(item.metadataUri)});`).join('\n')}
 ${royaltySetup(project)}
 ${premint > 0 ? `        mintedSupply = PREMINT_QUANTITY;
         _mint(address(uint160(${BigInt(project.modules.premint.recipient)})), ${firstId}, PREMINT_QUANTITY, "");` : ''}
+    }
+
+    /// @notice Permissionless: stores only metadata committed by ITEMS_ROOT, so no caller can choose an item URI.
+    function registerItems(ItemRegistration[] calldata items) external {
+        for (uint256 i; i < items.length; ++i) {
+            ItemRegistration calldata item = items[i];
+            if (knownItem[item.tokenId]) continue;
+            if (item.index >= ITEM_COUNT || item.proof.length != ITEM_TREE_DEPTH) revert InvalidItemProof();
+            bytes32 node = sha256(abi.encodePacked(bytes1(0x00), item.index, item.tokenId, sha256(bytes(item.uri))));
+            uint256 position = item.index;
+            for (uint256 level; level < ITEM_TREE_DEPTH; ++level) {
+                node = (position & 1) == 0
+                    ? sha256(abi.encodePacked(bytes1(0x01), node, item.proof[level]))
+                    : sha256(abi.encodePacked(bytes1(0x01), item.proof[level], node));
+                position >>= 1;
+            }
+            if (node != ITEMS_ROOT) revert InvalidItemProof();
+            _registerItem(item.tokenId, item.uri);
+        }
+    }
+
+    function _registerItem(uint256 tokenId, string memory itemUri) private {
+        knownItem[tokenId] = true;
+        _itemUri[tokenId] = itemUri;
+        ++registeredItems;
+        emit URI(itemUri, tokenId);
     }
 
     function uri(uint256 tokenId) public view override returns (string memory) {
@@ -94,7 +185,9 @@ ${premint > 0 ? `        mintedSupply = PREMINT_QUANTITY;
         return _itemUri[tokenId];
     }
 
+    /// @dev Openings start only after every item is registered, so an accepted reward can always be delivered.
     function reserve(bytes32 actionKey, address recipient) external onlyController {
+        if (registeredItems != ITEM_COUNT) revert ItemsNotRegistered();
         if (recipient == address(0) || reservedRecipient[actionKey] != address(0) || completed[actionKey]) revert InvalidReservation();
         if (SUPPLY_CAPPED && mintedSupply + reservedSupply >= MAX_SUPPLY) revert SupplyUnavailable();
         reservedRecipient[actionKey] = recipient;
@@ -132,8 +225,7 @@ ${premint > 0 ? `        mintedSupply = PREMINT_QUANTITY;
 }
 
 function lootConsumer(project: StudioProject, fingerprint: string): string {
-  const weights = project.loot.items.map(item => BigInt(item.weight));
-  const total = weights.reduce((a, b) => a + b, 0n);
+  const table = weightTable(project, true);
   return `${header}
 ${consumerImports}
 interface ID20LootCollection {
@@ -148,9 +240,7 @@ interface ID20LootCollection {
 contract D20LootStarter is D20VRFConsumer {
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
     uint32 public constant CALLBACK_GAS = 100_000;
-    uint256 public constant TOTAL_WEIGHT = ${total};
-    uint256[${weights.length}] private _weights = [${weights.map(value => `uint256(${value})`).join(', ')}];
-    uint256[${weights.length}] private _tokenIds = [${project.loot.items.map((item, index) => `uint256(${effectiveTokenId(item, index)})`).join(', ')}];
+${table.constants}
     ID20LootCollection public immutable collection;
     struct Opening { address requester; bytes32 actionKey; bytes32 word; bool ready; bool refunded; bool delivered; address deliveryRecipient; }
     mapping(uint256 => Opening) public openings;
@@ -189,6 +279,7 @@ contract D20LootStarter is D20VRFConsumer {
     function _open(bytes32 actionId, address recipient) internal returns (uint256 requestId) {
         if (actionId == bytes32(0)) revert InvalidAction();
         if (recipient == address(0)) revert InvalidRecipient();
+        _authorizeOpen(msg.sender, actionId, recipient);
         bytes32 actionKey = keccak256(abi.encode(msg.sender, actionId));
         uint256 previous = requestForAction[actionKey];
         if (previous != 0 && !openings[previous].refunded) revert ActionAlreadyRequested();
@@ -203,6 +294,8 @@ contract D20LootStarter is D20VRFConsumer {
         requestForAction[actionKey] = requestId;
         emit OpeningRequested(actionKey, requestId, msg.sender);
     }
+
+${authorizeOpenHook(true)}
 
     function _fulfillRandomness(uint256 requestId, bytes32 word) internal override {
         Opening storage opening = openings[requestId];
@@ -223,18 +316,11 @@ contract D20LootStarter is D20VRFConsumer {
         emit OpeningRefunded(requestId);
     }
 
-    function rewardIndex(uint256 requestId) public view returns (uint256) {
+    function rewardIndex(uint256 requestId) public view returns (uint256 index) {
         if (!openings[requestId].ready) revert NotReady();
-        uint256 draw = ID20VRF(vrfCoordinator).getMappedResult(requestId)[0];
-        uint256 cumulative;
-        for (uint256 i; i < _weights.length; ++i) {
-            cumulative += _weights[i];
-            if (draw <= cumulative) return i;
-        }
-        revert NotReady();
-    }
+${table.lookup}
 
-    function rewardTokenId(uint256 requestId) public view returns (uint256) { return _tokenIds[rewardIndex(requestId)]; }
+    function rewardTokenId(uint256 requestId) public view returns (uint256) { return _packed(TOKEN_IDS, rewardIndex(requestId), 32); }
 
     /// @notice Recover delivery to an unsupported NFT receiver without changing the accepted outcome.
     /// @dev Only the original requester can redirect its outstanding accepted entitlement.
@@ -274,7 +360,8 @@ function revealCollection(project: StudioProject, fingerprint: string): string {
   const completed = `        nextRevealToken = start + count;
         pendingRevealStart = 0;
         pendingRevealCount = 0;
-        emit CollectionBatchRevealed(start, count);`;
+        emit CollectionBatchRevealed(start, count);
+        emit BatchMetadataUpdate(start, start + count - 1);`;
   const checkRange = '        if (count == 0 || start != pendingRevealStart || count != pendingRevealCount) revert InvalidAssignment();';
   const batchLookup = `    function _batchFor(uint256 tokenId) private view returns (FinalizedBatch storage batch) {
         uint256 low;
@@ -344,10 +431,12 @@ ${completed}
 ${batchLookup}`;
   return `${header}
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {IERC4906} from "@openzeppelin/contracts/interfaces/IERC4906.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 ${ownableImports}
 /// @notice Owner-distributed ERC721 with optional supply cap and frozen ${mode} reveal batches.
-contract D20RevealCollection is ERC721, ERC2981, Ownable, ReentrancyGuard {
+contract D20RevealCollection is IERC4906, ERC721, ERC2981, Ownable, ReentrancyGuard {
     using Strings for uint256;
     bytes32 public constant CONFIG_DIGEST = 0x${fingerprint};
     bool public constant SUPPLY_CAPPED = ${project.collection.maxSupply !== null};
@@ -364,6 +453,8 @@ ${mode === 'token-hash' ? '    bytes32 public constant TOKEN_HASH_DOMAIN = kecca
     uint256 public pendingRevealStart;
     ${countType} public pendingRevealCount;
     string public metadataBaseUri;
+    /// @notice Placeholder returned for minted tokens awaiting reveal; empty when not configured.
+    string public unrevealedUri;
 ${shuffle ? '    mapping(uint256 => uint256) private _metadataIndex;' : `    struct FinalizedBatch { uint256 start; uint256 end; ${mode === 'offset' ? 'uint256 offset' : 'bytes32 word'}; }
     FinalizedBatch[] public finalizedBatches;`}
     error NotRevealed();
@@ -378,6 +469,7 @@ ${mode === 'token-hash' ? '    error NotParticipating();' : ''}
 ${controller()}
     constructor(address initialOwner) ERC721(${solidityString(project.collection.name)}, ${solidityString(project.collection.symbol)}) Ownable(initialOwner) {
         metadataBaseUri = ${solidityString(project.collection.metadataBaseUri)};
+        unrevealedUri = ${solidityString(project.reveal.unrevealedUri)};
 ${royaltySetup(project)}
     }
 
@@ -433,12 +525,13 @@ ${assignmentCode}
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         _requireOwned(tokenId);
         if (tokenId < REVEAL_OFFSET) return string.concat(metadataBaseUri, tokenId.toString(), ".json");
-        if (tokenId >= nextRevealToken) return "";
+        if (tokenId >= nextRevealToken) return unrevealedUri;
         return string.concat(metadataBaseUri, ${mode === 'token-hash' ? 'tokenId' : 'metadataIndex(tokenId)'}.toString(), ".json");
     }
 
-    function supportsInterface(bytes4 interfaceId) public view override(ERC721, ERC2981) returns (bool) {
-        return super.supportsInterface(interfaceId);
+    function supportsInterface(bytes4 interfaceId) public view override(IERC165, ERC721, ERC2981) returns (bool) {
+        // ERC-4906: marketplaces refresh metadata when BatchMetadataUpdate is emitted at reveal.
+        return interfaceId == bytes4(0x49064906) || super.supportsInterface(interfaceId);
     }
 }
 `;
@@ -558,10 +651,11 @@ ${resultCode}
 `;
 }
 
-export function nftFiles(project: StudioProject, fingerprint: string): GeneratedFile[] {
+export function nftFiles(project: StudioProject, fingerprint: string, items?: ItemCommitment): GeneratedFile[] {
+  if (project.mechanic === 'lootbox' && !items) throw new Error('A new loot collection requires its item commitment.');
   return project.mechanic === 'lootbox'
     ? [
-      { path: 'contracts/D20LootCollection.sol', language: 'solidity', content: lootCollection(project, fingerprint) },
+      { path: 'contracts/D20LootCollection.sol', language: 'solidity', content: lootCollection(project, fingerprint, items!) },
       { path: 'contracts/D20LootStarter.sol', language: 'solidity', content: lootConsumer(project, fingerprint) },
     ]
     : [

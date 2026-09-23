@@ -41,6 +41,7 @@ for (const seed of [
   '@openzeppelin/contracts/token/ERC1155/ERC1155.sol',
   '@openzeppelin/contracts/token/ERC721/ERC721.sol',
   '@openzeppelin/contracts/token/common/ERC2981.sol',
+  '@openzeppelin/contracts/interfaces/IERC4906.sol',
   '@openzeppelin/contracts/access/Ownable.sol',
   '@openzeppelin/contracts/utils/ReentrancyGuard.sol',
   '@openzeppelin/contracts/utils/Strings.sol',

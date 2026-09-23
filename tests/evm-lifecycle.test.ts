@@ -18,11 +18,12 @@ const word = zeroPadValue('0x1234', 32);
 const secondWord = zeroPadValue('0xabcd', 32);
 const tx = async (pending: Promise<ContractTransactionResponse>) => (await pending).wait();
 
-async function compile(project: StudioProject): Promise<Artifacts> {
+async function compile(project: StudioProject, extra: Record<string, string> = {}): Promise<Artifacts> {
   const bundle = await generateProject(project);
   if (bundle.kind !== 'starter') throw new Error(JSON.stringify(bundle.issues));
   const sources = Object.fromEntries(bundle.files.filter(file => file.language === 'solidity').map(file => [file.path, { content: file.content }]));
   sources['tests/evm-fixtures.sol'] = { content: readFileSync(resolve('tests/evm-fixtures.sol'), 'utf8') };
+  for (const [path, content] of Object.entries(extra)) sources[path] = { content };
   const key = JSON.stringify(sources);
   const cached = artifactCache.get(key);
   if (cached) return cached;
@@ -59,6 +60,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
     project.createdAt = project.updatedAt = '2026-09-22T00:00:00Z';
     project.collection.maxSupply = 4;
     project.collection.metadataBaseUri = 'ipfs://fixed-metadata/';
+    project.reveal.unrevealedUri = 'ipfs://fixed-metadata/unrevealed.json';
     project.loot.items = [
       { id: 'common', tokenId: '42', name: '雪 "item"', metadataUri: 'ipfs://common-42', weight: 60 },
       { id: 'rare', name: 'Rare', metadataUri: 'ipfs://rare-1', weight: 40 },
@@ -92,6 +94,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
     expect(await collection.name()).toBe(project.collection.name);
     expect(await collection.balanceOf(owner.address, 42)).toBe(2n);
     expect(await collection.uri(42)).toBe('ipfs://common-42');
+    expect(await collection.registeredItems()).toBe(await collection.ITEM_COUNT());
     expect(await collection.royaltyInfo(42, 10_000)).toEqual([other.address, 750n]);
     expect(await collection.supportsInterface('0x2a55205a')).toBe(true);
     await expect((collection.connect(player) as Contract).setController(player.address)).rejects.toThrow();
@@ -330,7 +333,9 @@ describe('generated NFT templates on a local in-process EVM', () => {
     await expect(collection.mint(owner.address, 1)).rejects.toThrow();
     await tx(collection.closeMint());
     await expect(collection.mint(owner.address, 1)).rejects.toThrow();
-    expect(await collection.tokenURI(0)).toBe(includeInReveal ? '' : 'ipfs://fixed-metadata/0.json');
+    expect(await collection.tokenURI(0)).toBe(includeInReveal ? 'ipfs://fixed-metadata/unrevealed.json' : 'ipfs://fixed-metadata/0.json');
+    expect(await collection.tokenURI(3)).toBe('ipfs://fixed-metadata/unrevealed.json');
+    for (const interfaceId of ['0x49064906', '0x80ac58cd', '0x5b5e139f', '0x2a55205a', '0x01ffc9a7']) expect(await collection.supportsInterface(interfaceId)).toBe(true);
     await tx(consumer.requestReveal({ value: 1000 }));
     expect((await consumer.reveals(1)).count).toBe(includeInReveal ? 4n : 2n);
     await tx(coordinator.fulfill(1, word, 0, { gasLimit: 2_000_000 }));
@@ -339,7 +344,9 @@ describe('generated NFT templates on a local in-process EVM', () => {
     const assignment = Array.from(await consumer.assignment(1)) as bigint[];
     const offset = includeInReveal ? 0n : 2n;
     expect(new Set(assignment.map(String)).size).toBe(includeInReveal ? 4 : 2);
-    await tx((consumer.connect(other) as Contract).finalizeReveal(1));
+    const finalized = await tx((consumer.connect(other) as Contract).finalizeReveal(1));
+    const refresh = finalized!.logs.map(log => { try { return collection.interface.parseLog(log); } catch { return null; } }).find(event => event?.name === 'BatchMetadataUpdate');
+    expect([refresh?.args._fromTokenId, refresh?.args._toTokenId]).toEqual([offset, 3n]);
     expect(await collection.nextRevealToken()).toBe(4n);
     for (let i = 0; i < assignment.length; i++) {
       expect(await collection.tokenURI(offset + BigInt(i))).toBe(`ipfs://fixed-metadata/${offset + assignment[i]}.json`);
@@ -353,6 +360,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
 
   it('keeps reveal operator and collection owner explicit through a deployment factory', async () => {
     const project = input('reveal');
+    project.reveal.unrevealedUri = '';
     const artifacts = await compile(project);
     const coordinator = await deploy(artifacts, 'LifecycleCoordinator');
     const factory = await deploy(artifacts, 'DeploymentFactory');
@@ -369,6 +377,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
     expect(await consumer.operator()).toBe(player.address);
     await tx(collection.setController(await consumer.getAddress()));
     await tx(collection.mint(owner.address, 4));
+    expect(await collection.tokenURI(0)).toBe('');
     await tx(collection.closeMint());
     await expect(consumer.requestReveal({ value: 1000 })).rejects.toThrow();
     await tx((consumer.connect(player) as Contract).requestReveal({ value: 1000 }));
@@ -475,7 +484,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
     await tx(consumer.finalizeReveal(2));
     const firstUri = await collection.tokenURI(0);
     expect(firstUri).not.toBe('');
-    expect(await collection.tokenURI(10)).toBe('');
+    expect(await collection.tokenURI(10)).toBe('ipfs://fixed-metadata/unrevealed.json');
     await tx(consumer.requestReveal({ value: 1000 }));
     expect((await consumer.reveals(3)).start).toBe(10n);
     expect((await consumer.reveals(3)).count).toBe(256n);
@@ -559,7 +568,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
     expect(await collection.mintedSupply()).toBe(3n);
     await tx(consumer.finalizeReveal(1));
     expect(await collection.nextRevealToken()).toBe(2n);
-    expect(await collection.tokenURI(2)).toBe('');
+    expect(await collection.tokenURI(2)).toBe('ipfs://fixed-metadata/unrevealed.json');
   }, 30_000);
 
   it('uses a mapped offset over more than 256 minted tokens and finalizes each rotation in constant storage work', async () => {
@@ -591,7 +600,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
     expect(indices[0]).toBe(2n + offset);
     expect(indices[299]).toBe(2n + ((299n + offset) % 300n));
     expect(await collection.tokenURI(2)).toBe(`ipfs://fixed-metadata/${2n + offset}.json`);
-    expect(await collection.tokenURI(302)).toBe('');
+    expect(await collection.tokenURI(302)).toBe('ipfs://fixed-metadata/unrevealed.json');
     await tx(consumer.requestReveal({ value: 1000 }));
     expect((await consumer.reveals(2)).start).toBe(302n);
     expect((await consumer.reveals(2)).count).toBe(25n);
@@ -639,7 +648,7 @@ describe('generated NFT templates on a local in-process EVM', () => {
     expect(await collection.tokenHash(3)).not.toBe(expected);
     expect(await collection.tokenURI(2)).toBe('ipfs://fixed-metadata/2.json');
     expect(await collection.tokenURI(0)).toBe('ipfs://fixed-metadata/0.json');
-    expect(await collection.tokenURI(302)).toBe('');
+    expect(await collection.tokenURI(302)).toBe('ipfs://fixed-metadata/unrevealed.json');
     await expect(collection.tokenHash(0)).rejects.toThrow();
     await expect(collection.tokenHash(302)).rejects.toThrow();
     await tx(consumer.requestReveal({ value: 1000 }));
@@ -652,5 +661,88 @@ describe('generated NFT templates on a local in-process EVM', () => {
     ));
     expect(await collection.tokenHash(326)).toBe(lastExpected);
     expect(await collection.tokenURI(326)).toBe('ipfs://fixed-metadata/326.json');
+  }, 30_000);
+
+  it('deploys a 256-item loot table within limits, registers the rest only with valid proofs and walks packed weights', async () => {
+    const project = input('lootbox');
+    project.collection.maxSupply = null;
+    project.loot.items = Array.from({ length: 256 }, (_, index) => ({
+      id: `item-${index}`, name: `Item ${index}`, weight: index % 4 === 1 ? 0 : index + 1,
+      metadataUri: `ipfs://bafy-metadata-reference-${index}/item.json`.padEnd(73, 'x'),
+    }));
+    const bundle = await generateProject(project);
+    const registration = JSON.parse(bundle.files.find(file => file.path === 'config/item-registration.json')!.content) as {
+      storedAtDeployment: number; pending: { index: number; tokenId: string; uri: string; proof: string[] }[];
+    };
+    const artifacts = await compile(project);
+    const initcode = artifacts.D20LootCollection.evm.bytecode.object.length / 2;
+    expect(initcode).toBeLessThan(49_152);
+    const coordinator = await deploy(artifacts, 'LifecycleCoordinator');
+    const collectionFactory = new ContractFactory(artifacts.D20LootCollection.abi, artifacts.D20LootCollection.evm.bytecode.object, owner);
+    const collection = await collectionFactory.deploy(owner.address) as unknown as Contract;
+    const deployed = await collection.deploymentTransaction()!.wait();
+    expect(deployed!.gasUsed).toBeLessThan(10_000_000n);
+    const consumer = await deploy(artifacts, 'D20LootStarter', [await coordinator.getAddress(), await collection.getAddress()]);
+    await tx(collection.setController(await consumer.getAddress()));
+    expect(await collection.registeredItems()).toBe(BigInt(registration.storedAtDeployment));
+    await expect(consumer.open(id('before-registration'), { value: 1000 })).rejects.toThrow();
+
+    const [first, second] = registration.pending;
+    await expect(collection.registerItems([{ ...first, uri: `${first.uri}-tampered` }])).rejects.toThrow();
+    await expect(collection.registerItems([{ ...first, tokenId: '999999' }])).rejects.toThrow();
+    await expect(collection.registerItems([{ ...first, proof: second.proof }])).rejects.toThrow();
+    await expect(collection.registerItems([{ ...first, proof: first.proof.slice(1) }])).rejects.toThrow();
+    const registrar = collection.connect(other) as Contract;
+    for (let start = 0; start < registration.pending.length; start += 64) {
+      await tx(registrar.registerItems(registration.pending.slice(start, start + 64), { gasLimit: 29_000_000 }));
+    }
+    expect(await collection.registeredItems()).toBe(256n);
+    await tx(registrar.registerItems([first], { gasLimit: 1_000_000 }));
+    expect(await collection.registeredItems()).toBe(256n);
+    expect(await collection.uri(255)).toBe(project.loot.items[255].metadataUri);
+    expect(await collection.uri(first.index)).toBe(first.uri);
+
+    const cumulative: bigint[] = [];
+    project.loot.items.reduce((total, item) => { cumulative.push(total + BigInt(item.weight)); return total + BigInt(item.weight); }, 0n);
+    const words = [word, secondWord, zeroPadValue('0x01', 32), keccak256('0x1234'), keccak256('0xfeed')];
+    for (const [index, value] of words.entries()) {
+      await tx(consumer.open(id(`large-table-${index}`), { value: 1000 }));
+      await tx(coordinator.fulfill(index + 1, value, 0, { gasLimit: 2_000_000 }));
+      const draw = (await coordinator.getMappedResult(index + 1))[0] as bigint;
+      const expected = cumulative.findIndex(total => total >= draw);
+      expect(project.loot.items[expected].weight).toBeGreaterThan(0);
+      expect(await consumer.rewardIndex(index + 1)).toBe(BigInt(expected));
+      expect(await consumer.rewardTokenId(index + 1)).toBe(BigInt(expected));
+      const receipt = await tx(consumer.deliver(index + 1));
+      expect(receipt!.gasUsed).toBeLessThan(250_000n);
+      expect(await collection.balanceOf(owner.address, expected)).toBeGreaterThan(0n);
+    }
+  }, 120_000);
+
+  it('lets an integration gate openings by overriding _authorizeOpen without changing delivery or refunds', async () => {
+    const gated = `// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+import {D20LootStarter} from "contracts/D20LootStarter.sol";
+contract GatedLootStarter is D20LootStarter {
+    address public immutable game;
+    error NotEntitled();
+    constructor(address coordinator, address collection_, address game_) D20LootStarter(coordinator, collection_) { game = game_; }
+    function _authorizeOpen(address requester, bytes32, address) internal view override { if (requester != game) revert NotEntitled(); }
+}
+`;
+    const project = input('lootbox');
+    const artifacts = await compile(project, { 'tests/GatedLootStarter.sol': gated });
+    const coordinator = await deploy(artifacts, 'LifecycleCoordinator');
+    const collection = await deploy(artifacts, 'D20LootCollection', [owner.address]);
+    const consumer = await deploy(artifacts, 'GatedLootStarter', [await coordinator.getAddress(), await collection.getAddress(), player.address]);
+    await tx(collection.setController(await consumer.getAddress()));
+    await expect((consumer.connect(other) as Contract).open(id('not-entitled'), { value: 1000 })).rejects.toThrow();
+    expect(await coordinator.nextId()).toBe(1n);
+    expect(await collection.reservedSupply()).toBe(0n);
+    await tx((consumer.connect(player) as Contract).openTo(id('entitled'), other.address, { value: 1000 }));
+    await tx(coordinator.fulfill(1, word, 0, { gasLimit: 2_000_000 }));
+    await tx((consumer.connect(other) as Contract).deliver(1));
+    expect(await collection.balanceOf(other.address, await consumer.rewardTokenId(1))).toBe(1n);
+    expect((await coordinator.requests(1)).recipient).toBe(player.address);
   }, 30_000);
 });

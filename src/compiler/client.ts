@@ -1,5 +1,6 @@
 import type { GeneratedFile } from '../core/types';
 import { collectSources, COMPILER_PACKAGE_VERSION } from './input';
+import { deploymentLimitDiagnostics } from './limits';
 import type { CompilationResult } from './types';
 
 export type { CompilationResult, CompiledContract, CompilerDiagnostic } from './types';
@@ -15,6 +16,7 @@ export async function compileFiles(
   const failure = (message: string): CompilationResult => ({
     compilerVersion: COMPILER_PACKAGE_VERSION,
     succeeded: false,
+    deployable: false,
     durationMs: Math.round(performance.now() - started),
     contracts: [],
     diagnostics: [{ severity: 'error', message }],
@@ -46,7 +48,8 @@ export async function compileFiles(
       if (finished) return;
       finished = true;
       cleanup();
-      resolve({ ...result, durationMs: Math.round(performance.now() - started) });
+      const limits = result.succeeded ? deploymentLimitDiagnostics(result.contracts) : [];
+      resolve({ ...result, deployable: result.succeeded && limits.length === 0, diagnostics: [...result.diagnostics, ...limits], durationMs: Math.round(performance.now() - started) });
     };
     const onAbort = () => {
       if (finished) return;
@@ -65,7 +68,8 @@ export async function compileFiles(
     }
     worker.onmessage = (event: MessageEvent<CompilationResult>) => {
       const result = event.data;
-      if (!result || typeof result.succeeded !== 'boolean' || !Array.isArray(result.diagnostics) || !Array.isArray(result.contracts)) {
+      if (!result || typeof result.succeeded !== 'boolean' || !Array.isArray(result.diagnostics) || !Array.isArray(result.contracts) ||
+        result.contracts.some(contract => typeof contract?.bytecode !== 'string' || typeof contract.deployedBytecode !== 'string')) {
         finish(failure('The compiler returned an invalid response.'));
         return;
       }

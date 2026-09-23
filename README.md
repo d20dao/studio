@@ -4,7 +4,7 @@ Product specification and implementation brief
 
 - **Production domain:** [studio.d20dao.org](https://studio.d20dao.org)
 - **Created:** September 22, 2026
-- **Status:** Studio v0.4.0 demo / beta, including local project configuration, metadata previews and NFT boilerplate generation. Do not use exported code as-is: have your agent customize it, then review and test the result before deployment. The product specification below also includes later capabilities.
+- **Status:** Studio v0.4.0 demo / beta (generator 0.5.0), including local project configuration, metadata previews and NFT boilerplate generation. Do not use exported code as-is: have your agent customize it, then review and test the result before deployment. The product specification below also includes later capabilities.
 - **Primary audience:** Game developers and NFT project teams.
 - **Primary objective:** Help independent projects adopt D20DAO by turning their game or NFT mechanic into a practical integration starter.
 - **Interface studies:** [ImageGen concepts and design references](design/README.md), prepared with the requested Astra medium agent. These are visual studies, not an implemented Studio application.
@@ -27,7 +27,8 @@ The current React/TypeScript/Vite application implements:
 - Metadata thumbnails and accessible NFT cards, bounded HTTPS/IPFS/Arweave loading, local JSON fallback, and previewed JSON/CSV item import.
 - A file browser with syntax highlighting, line numbers, compiler diagnostic navigation, ZIP export, and project-specific agent instructions.
 - New-project ERC-1155 loot or ERC-721 reveal collections with configured premint, ERC-2981 royalty signaling, supply limits, and authenticated VRF consumers. Existing-project exports remain adapters and instructions. Invalid configuration produces a planning bundle without Solidity.
-- Real client-side Solidity 0.8.28 compilation in a worker, using pinned SDK 0.4.0 and OpenZeppelin 5.6.1 sources, with cancellation and ABI/bytecode inspection/download.
+- Real client-side Solidity 0.8.28 compilation in a worker, using pinned SDK 0.4.0 and OpenZeppelin 5.6.1 sources, with cancellation, ABI/bytecode inspection/download and EIP-170/EIP-3860 deployment size checks.
+- Agent instructions with a deployment sequence, off-chain fee quoting, request tracking and recovery calls from the pinned SDK, plus a Foundry configuration for new collection pairs.
 - Project, persistence, metadata, generator, compiler, and local EVM lifecycle tests, plus a static production build and CI configuration.
 
 **Current boundary:** new-project templates implement their documented NFT/VRF behavior; application sale pricing, fee sponsorship, custom refund routing, and game-specific eligibility remain explicit integration work. Existing-contract integration still depends on that contract's interface and permissions. Callbacks store the accepted word; bounded application delivery/finalization is a separate transaction and is not a mandatory Studio onboarding step. Local EVM tests use a coordinator lifecycle double, not live cryptographic proof acceptance. No live deployment or hosted publication is included.
@@ -305,7 +306,7 @@ The reveal workflow should generate the integration for a compatible collection 
 
 ### Collection size and truthful scope
 
-Collection supply defaults to unlimited. A developer can set an explicit finite cap; there is no 128-token default or 256-token collection limit. Existing project caps are preserved when importing earlier schemas.
+Collection supply defaults to unlimited. A developer can set an explicit finite cap; there is no 128-token default or 256-token collection limit.
 
 Each new-collection reveal freezes an already-minted range. Minting can continue while that range is pending; an expired retry keeps the same range. The selected mode changes both generated contracts and agent instructions:
 
@@ -315,7 +316,7 @@ Each new-collection reveal freezes an already-minted range. Minting can continue
 | Index offset | NumberRange from 0 to batch count minus one | An unbiased cyclic offset over all currently unrevealed minted tokens; a rotation, not a full shuffle. |
 | Per-token hash | Raw VRF word | A domain-separated hash/seed per token. Traits and seed-driven rendering/publication remain explicit customization work. |
 
-Offset and hash modes store finalized ranges without looping over all participating tokens. Their getters find the correct batch by binary search. The hash mode retains indexed metadata URIs; it does not automatically transform prewritten metadata into randomized traits. ERC-721 premint allocation is distributed with `mintPremint` in gas-appropriate transactions rather than a constructor loop.
+Offset and hash modes store finalized ranges without looping over all participating tokens. Their getters find the correct batch by binary search. The hash mode retains indexed metadata URIs; it does not automatically transform prewritten metadata into randomized traits. ERC-721 premint allocation is distributed with `mintPremint` in gas-appropriate transactions rather than a constructor loop. Unrevealed tokens return an optional fixed placeholder URI, and each finalized batch emits ERC-4906 `BatchMetadataUpdate` so marketplaces refresh metadata.
 
 A publisher-provided Merkle root proves membership in its committed output, not by itself that the output was correctly derived from the VRF word. The generated documentation must explain the verification boundary of the selected design.
 

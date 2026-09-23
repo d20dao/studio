@@ -1,6 +1,6 @@
 import type { IntegrationTarget, Mechanic, StudioProject, ValidationIssue } from './types';
 
-export const PROJECT_SCHEMA_VERSION = 3;
+export const PROJECT_SCHEMA_VERSION = 4;
 export const MAX_PROJECT_BYTES = 512 * 1024;
 export const MAX_ITEMS = 256;
 export const MAX_URI_LENGTH = 512;
@@ -9,6 +9,8 @@ export const MAX_PROJECT_NAME_LENGTH = 80;
 const MAX_UINT256 = (1n << 256n) - 1n;
 const addressPattern = /^0x[0-9a-fA-F]{40}$/;
 const zeroAddress = /^0x0{40}$/i;
+/** Lowercase schemes only: onchain URIs are returned verbatim to wallets and marketplaces. */
+export const METADATA_REFERENCE = /^(https:\/\/|ipfs:\/\/|ar:\/\/)/;
 
 export function createProject(name: string, mechanic: Mechanic, integration: IntegrationTarget = 'new'): StudioProject {
   const now = new Date().toISOString();
@@ -21,7 +23,7 @@ export function createProject(name: string, mechanic: Mechanic, integration: Int
       { id: 'moonstone', name: 'Moonstone', metadataUri: '', weight: 25 },
       { id: 'ancient-relic', name: 'Ancient relic', metadataUri: '', weight: 5 },
     ] },
-    reveal: { mode: 'shuffle' },
+    reveal: { mode: 'shuffle', unrevealedUri: '' },
     modules: {
       premint: { enabled: false, quantity: 8, recipient: '', includeInReveal: true },
       royalty: { enabled: false, bps: 500, recipient: '' },
@@ -73,11 +75,14 @@ export function validateProject(project: StudioProject): ValidationIssue[] {
       if (!whole(item.weight, 0, 1_000_000)) error(`${prefix}.weight`, 'Weight must be a whole number between 0 and 1,000,000.');
       total += item.weight;
       if (project.integration === 'new' && !item.metadataUri.trim()) error(`${prefix}.metadataUri`, 'Set the final item metadata URI before generating the collection; it has no URI setter.');
-      if (item.metadataUri && !/^(https:\/\/|ipfs:\/\/|ar:\/\/)/i.test(item.metadataUri)) error(`${prefix}.metadataUri`, 'Use an HTTPS, IPFS, or Arweave metadata reference.');
+      if (item.metadataUri && !METADATA_REFERENCE.test(item.metadataUri)) error(`${prefix}.metadataUri`, 'Use a lowercase https://, ipfs:// or ar:// metadata reference.');
     });
     if (!Number.isSafeInteger(total) || total <= 0) error('loot.items', 'At least one item needs a positive weight.');
   }
-  if (project.collection.metadataBaseUri && !/^(https:\/\/|ipfs:\/\/|ar:\/\/)/i.test(project.collection.metadataBaseUri)) error('collection.metadataBaseUri', 'Use an HTTPS, IPFS, or Arweave metadata reference.');
+  if (project.collection.metadataBaseUri && !METADATA_REFERENCE.test(project.collection.metadataBaseUri)) error('collection.metadataBaseUri', 'Use a lowercase https://, ipfs:// or ar:// metadata reference.');
+  const unrevealedUri = project.reveal?.unrevealedUri ?? '';
+  if (unrevealedUri && !METADATA_REFERENCE.test(unrevealedUri)) error('reveal.unrevealedUri', 'Use a lowercase https://, ipfs:// or ar:// metadata reference.');
+  if (project.mechanic === 'reveal' && project.integration === 'new' && !unrevealedUri.trim()) warning('reveal.unrevealedUri', 'Unrevealed tokens will return an empty tokenURI, so marketplaces show no metadata until reveal. Add a placeholder metadata URI.');
   const premint = project.modules.premint;
   if (premint.enabled) {
     if (!whole(premint.quantity, 1, supplyCap ?? Number.MAX_SAFE_INTEGER)) error('modules.premint.quantity', supplyCap === null ? 'Premint quantity must be a positive safe whole number.' : 'Premint must be a positive safe whole number within the supply cap.');
@@ -89,8 +94,18 @@ export function validateProject(project: StudioProject): ValidationIssue[] {
     if (!whole(royalty.bps, 0, 10000)) error('modules.royalty.bps', 'Royalty must be between 0 and 10,000 basis points.');
     if (!addressPattern.test(royalty.recipient) || zeroAddress.test(royalty.recipient)) error('modules.royalty.recipient', 'Enter a complete, nonzero royalty receiver address.');
   }
-  if (!/^(0|[1-9][0-9]{0,40})(\.[0-9]{1,18})?$/.test(project.payment.price)) error('payment.price', 'Enter a non-negative price with at most 18 decimal places.');
-  if (project.payment.refundRecipient === 'custom' && (!addressPattern.test(project.payment.refundAddress) || zeroAddress.test(project.payment.refundAddress))) error('payment.refundAddress', 'Enter a complete, nonzero refund address.');
+  const payment = project.payment;
+  if (!/^(0|[1-9][0-9]{0,40})(\.[0-9]{1,18})?$/.test(payment.price)) error('payment.price', 'Enter a non-negative price with at most 18 decimal places.');
+  else if (/[1-9]/.test(payment.price)) warning('payment.price', project.integration === 'existing'
+    ? 'The generated adapter does not collect this price. Implement the sale in your host integration.'
+    : project.mechanic === 'lootbox'
+      ? 'The generated contracts do not collect this price: anyone can call open() and pay only the RNG fee until your integration enforces the sale in _authorizeOpen.'
+      : 'The generated contracts do not collect this price: only the collection owner mints. Implement the sale in your integration.');
+  if (payment.rngPayer === 'developer') warning('payment.rngPayer', 'The generated consumer charges the RNG fee to its caller. Developer sponsorship is integration work.');
+  if (payment.refundRecipient !== 'payer') {
+    if (!addressPattern.test(payment.refundAddress) || zeroAddress.test(payment.refundAddress)) error('payment.refundAddress', 'Enter a complete, nonzero refund address.');
+    warning('payment.refundRecipient', 'The generated consumer fixes protocol refunds to its caller. Routing them to this address is integration work.');
+  }
   if (project.network === 'arc-mainnet') warning('network', 'Mainnet is a project target only. Recheck the live manifest and pricing before integration.');
   // Business-incomplete drafts remain valid data, but no UI state may be called
   // valid when the same JSON would be rejected on the next load/import.
@@ -133,16 +148,10 @@ export function parseProjectJson(input: string): StudioProject {
   let value: unknown;
   try { value = JSON.parse(input); } catch { throw new Error('The project file is not valid JSON.'); }
   const p = object(value, 'project', ['schemaVersion','id','name','mechanic','integration','network','createdAt','updatedAt','isExample','collection','loot','reveal','modules','payment']);
-  if (p.schemaVersion !== 1 && p.schemaVersion !== 2 && p.schemaVersion !== PROJECT_SCHEMA_VERSION) throw new Error('Unsupported project schema. This Studio reads version 1, version 2 and version 3 projects.');
-  const legacy = p.schemaVersion === 1 || p.schemaVersion === 2;
-  if (legacy && Object.hasOwn(p, 'reveal')) throw new Error('Invalid project: unsupported field in legacy project.');
-  const reveal = legacy ? { mode: 'shuffle' } : object(p.reveal, 'reveal', ['mode']);
+  if (p.schemaVersion !== PROJECT_SCHEMA_VERSION) throw new Error(`Unsupported project schema. This Studio reads version ${PROJECT_SCHEMA_VERSION} projects.`);
+  const reveal = object(p.reveal, 'reveal', ['mode','unrevealedUri']);
   const c = object(p.collection, 'collection', ['name','symbol','standard','maxSupply','metadataBaseUri']);
-  const l = object(p.loot, 'loot', p.schemaVersion === 1 ? ['items','maxOpenings'] : ['items']);
-  // Legacy numeric supply caps are preserved, never reinterpreted as unlimited.
-  // Validate the removed v1 field before discarding it so malformed originals
-  // remain available through workspace recovery.
-  if (p.schemaVersion === 1 && Object.hasOwn(l, 'maxOpenings')) number(l.maxOpenings, 'loot.maxOpenings');
+  const l = object(p.loot, 'loot', ['items']);
   const m = object(p.modules, 'modules', ['premint','royalty']);
   const premint = object(m.premint, 'premint', ['enabled','quantity','recipient','includeInReveal']);
   const royalty = object(m.royalty, 'royalty', ['enabled','bps','recipient']);
@@ -158,8 +167,8 @@ export function parseProjectJson(input: string): StudioProject {
     integration: oneOf(p.integration, ['new','existing'], 'integration'),
     network: oneOf(p.network, ['arc-testnet','arc-mainnet'], 'network'),
     createdAt, updatedAt, isExample: boolean(p.isExample, 'isExample'),
-    collection: { name: text(c.name, 'collection.name', 80), symbol: text(c.symbol, 'symbol', 16), standard: oneOf(c.standard, ['erc721','erc1155'], 'standard'), maxSupply: p.schemaVersion === PROJECT_SCHEMA_VERSION && c.maxSupply === null ? null : number(c.maxSupply, 'maxSupply'), metadataBaseUri: text(c.metadataBaseUri, 'metadataBaseUri') },
-    reveal: { mode: oneOf(reveal.mode, ['shuffle', 'offset', 'token-hash'], 'reveal.mode') },
+    collection: { name: text(c.name, 'collection.name', 80), symbol: text(c.symbol, 'symbol', 16), standard: oneOf(c.standard, ['erc721','erc1155'], 'standard'), maxSupply: c.maxSupply === null ? null : number(c.maxSupply, 'maxSupply'), metadataBaseUri: text(c.metadataBaseUri, 'metadataBaseUri') },
+    reveal: { mode: oneOf(reveal.mode, ['shuffle', 'offset', 'token-hash'], 'reveal.mode'), unrevealedUri: text(reveal.unrevealedUri, 'reveal.unrevealedUri') },
     loot: { items: l.items.map((item, index) => {
       const i = object(item, `item ${index}`, ['id','tokenId','name','metadataUri','weight']);
       const tokenId = i.tokenId === undefined ? undefined : text(i.tokenId, 'item.tokenId', 78);
